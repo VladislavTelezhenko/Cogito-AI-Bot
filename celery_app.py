@@ -25,11 +25,15 @@ celery_app.conf.update(
     task_time_limit=3600*3
 )
 
-# Обновление токена спитч кита
+# Обновление токенов Яндекса каждые 11 часов
 celery_app.conf.beat_schedule = {
-    'refresh-iam-token-every-11-hours': {
+    'refresh-speechkit-token-every-11-hours': {
         'task': 's3_storage.refresh_iam_token',
-        'schedule': crontab(minute=0, hour='*/11'),  # каждые 11 часов
+        'schedule': crontab(minute=0, hour='*/11'),
+    },
+    'refresh-vision-token-every-11-hours': {
+        'task': 's3_storage.refresh_vision_iam_token',
+        'schedule': crontab(minute=0, hour='*/11'),
     },
 }
 

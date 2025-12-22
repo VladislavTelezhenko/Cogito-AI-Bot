@@ -26,6 +26,9 @@ redis==7.1.0
 # Yandex Cloud SDK
 yandexcloud==0.371.0
 
+# Image Processing
+Pillow==12.0.0
+
 # Data Validation
 pydantic==2.12.5
 pydantic-settings==2.12.0

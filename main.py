@@ -126,7 +126,7 @@ def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
     # Фото (количество)
     photos_count = db.query(models.UserDocument).filter(
         models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "image",
+        models.UserDocument.file_type == "photo",
         models.UserDocument.status == "completed",
         models.UserDocument.is_deleted == False
     ).count()
@@ -161,7 +161,7 @@ def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
     # Фото за сегодня
     daily_photos = db.query(models.UserDocument).filter(
         models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "image",
+        models.UserDocument.file_type == "photo",
         models.UserDocument.status == "completed",
         func.date(models.UserDocument.upload_date) == today
     ).count()
@@ -293,10 +293,10 @@ def get_user_documents(telegram_id: int, db: Session = Depends(get_db)):
         "total_count": len(documents)
     }
 
+
 # Удаление файла из базы знаний
 @app.delete("/kb/documents/{document_id}")
 def delete_document(document_id: int, db: Session = Depends(get_db)):
-
     # Находим файл
     document = db.query(models.UserDocument).filter(
         models.UserDocument.id == document_id
@@ -304,6 +304,19 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
 
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Если это фото — удаляем из S3
+    if document.file_type == "photo" and document.file_url:
+        # Извлекаем s3_key из file_url
+        bucket_name = os.getenv('YC_BUCKET_NAME')
+        try:
+            s3_key = document.file_url.split(f"{bucket_name}/")[1]
+
+            # Удаляем из S3
+            from s3_storage import delete_photo_from_s3
+            delete_photo_from_s3(s3_key)
+        except Exception as e:
+            print(f"⚠️ Не удалось извлечь s3_key или удалить файл: {e}")
 
     # Мягкое удаление с очисткой текста
     document.is_deleted = True
@@ -313,79 +326,6 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"success": True, "message": "Document deleted"}
-
-# Загрузка видео в базу знаний
-@app.post("/kb/upload/video", response_model=schemas.VideoUploadResponse)
-def upload_video_to_kb(data: schemas.VideoUploadRequest, db: Session = Depends(get_db)):
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Получаем активную подписку
-    subscription = db.query(models.UserSubscription).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    if not subscription:
-        raise HTTPException(status_code=400, detail="No active subscription")
-
-    # Получаем тариф
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == subscription.tier_id
-    ).first()
-
-    # Проверяем лимиты хранилища
-    total_video_hours = db.query(func.sum(models.UserDocument.duration_hours)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "video",
-        models.UserDocument.is_deleted == False
-    ).scalar() or 0
-
-    if tier.video_hours_limit != 9999 and total_video_hours >= tier.video_hours_limit:
-        raise HTTPException(status_code=400, detail="Storage limit exceeded")
-
-    # Проверяем дневной лимит
-    today = func.date(func.now())
-    daily_video_hours = db.query(func.sum(models.UserDocument.duration_hours)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "video",
-        func.date(models.UserDocument.upload_date) == today,
-        models.UserDocument.is_deleted == False
-    ).scalar() or 0
-
-    if tier.daily_video_hours != 9999 and daily_video_hours >= tier.daily_video_hours:
-        raise HTTPException(status_code=400, detail="Daily limit exceeded")
-
-    # Создаём записи для каждого видео и запускаем задачи
-    task_ids = []
-
-    for video in data.videos:
-        new_doc = models.UserDocument(
-            user_id=user.id,
-            filename=video['title'],
-            file_type="video",
-            status="pending",
-            file_url=video['url'],
-            duration_hours=video['duration'],
-            extracted_text=None
-        )
-
-        db.add(new_doc)
-        db.commit()
-        db.refresh(new_doc)
-
-        # Запускаем Celery задачу
-        from s3_storage import process_video
-        task = process_video.delay(video['url'], new_doc.id)
-        task_ids.append(task.id)
-
-    return {
-        "success": True,
-        "task_id": ",".join(task_ids),
-        "message": f"Добавлено {len(data.videos)} видео в обработку"
-    }
 
 # Создание задач на обработку видео
 @app.post("/kb/upload/video", response_model=schemas.VideoUploadResponse)
@@ -482,7 +422,7 @@ def update_document_status(document_id: int, data: dict, db: Session = Depends(g
 
     return {"success": True}
 
-# Возвращаем информацию статусе обработки видео
+# Возвращаем информацию о документе (для видео и фото)
 @app.get("/kb/documents/{document_id}/info")
 def get_document_info(document_id: int, db: Session = Depends(get_db)):
     doc = db.query(models.UserDocument).filter(models.UserDocument.id == document_id).first()
@@ -493,7 +433,124 @@ def get_document_info(document_id: int, db: Session = Depends(get_db)):
 
     return {
         "telegram_id": user.telegram_id,
-        "filename": doc.filename
+        "filename": doc.filename,
+        "extracted_text": doc.extracted_text,
+        "file_url": doc.file_url,
+        "status": doc.status
+    }
+
+# Загрузка фото в базу знаний
+@app.post("/kb/upload/photos", response_model=schemas.PhotoUploadResponse)
+def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(get_db)):
+    # Находим пользователя
+    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Получаем подписку и тариф
+    subscription = db.query(models.UserSubscription).filter(
+        models.UserSubscription.user_id == user.id,
+        models.UserSubscription.status == "active"
+    ).first()
+
+    if not subscription:
+        raise HTTPException(status_code=400, detail="No active subscription")
+
+    tier = db.query(models.SubscriptionTier).filter(
+        models.SubscriptionTier.id == subscription.tier_id
+    ).first()
+
+    # Проверяем лимиты хранилища
+    total_photos = db.query(func.count(models.UserDocument.id)).filter(
+        models.UserDocument.user_id == user.id,
+        models.UserDocument.file_type == "photo",
+        models.UserDocument.status == "completed",
+        models.UserDocument.is_deleted == False
+    ).scalar()
+
+    if tier.photos_limit != 9999 and total_photos >= tier.photos_limit:
+        raise HTTPException(status_code=400, detail="Storage limit exceeded")
+
+    # Проверяем дневной лимит
+    today = func.date(func.now())
+    daily_photos = db.query(func.count(models.UserDocument.id)).filter(
+        models.UserDocument.user_id == user.id,
+        models.UserDocument.file_type == "photo",
+        func.date(models.UserDocument.upload_date) == today
+    ).scalar()
+
+    if tier.daily_photos != 9999 and daily_photos >= tier.daily_photos:
+        raise HTTPException(status_code=400, detail="Daily limit exceeded")
+
+    # Определяем приоритет
+    tier_name = tier.tier_name
+    priority = get_priority(tier_name)
+
+    # Создаём записи в БД для каждого фото и запускаем задачи
+    task_ids = []
+
+    from s3_storage import upload_photo_to_s3, process_photo_ocr
+
+    for photo in data.photos:
+        # Создаём запись в БД
+        new_doc = models.UserDocument(
+            user_id=user.id,
+            filename=photo['filename'],
+            file_type="photo",
+            status="pending",
+            extracted_text=None,
+            file_url=None,
+            duration_hours=None
+        )
+
+        db.add(new_doc)
+        db.commit()
+        db.refresh(new_doc)
+
+        # Загружаем фото в S3
+        s3_key = upload_photo_to_s3(photo['base64'], user.id, new_doc.id)
+
+        # Сохраняем S3 URL в БД
+        s3_url = f"https://storage.yandexcloud.net/{os.getenv('YC_BUCKET_NAME')}/{s3_key}"
+        new_doc.file_url = s3_url
+        db.commit()
+
+        # Запускаем Celery задачу с приоритетом
+        task = process_photo_ocr.apply_async(
+            args=[new_doc.id, s3_key],
+            priority=priority
+        )
+        task_ids.append(task.id)
+
+    return {
+        "success": True,
+        "uploaded_count": len(data.photos),
+        "task_ids": task_ids
+    }
+
+# Получение presigned URL для фото
+@app.get("/kb/photo/{document_id}/presigned")
+def get_photo_presigned_url_endpoint(document_id: int, db: Session = Depends(get_db)):
+    # Находим документ
+    doc = db.query(models.UserDocument).filter(
+        models.UserDocument.id == document_id,
+        models.UserDocument.file_type == "photo"
+    ).first()
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    # Извлекаем s3_key из file_url
+    bucket_name = os.getenv('YC_BUCKET_NAME')
+    s3_key = doc.file_url.split(f"{bucket_name}/")[1]
+
+    # Генерируем presigned URL
+    from s3_storage import get_photo_presigned_url
+    presigned_url = get_photo_presigned_url(s3_key)
+
+    return {
+        "presigned_url": presigned_url,
+        "expires_in": 3600
     }
 
 

@@ -16,6 +16,9 @@ import json
 import httpx
 import ffmpeg
 import asyncio
+from PIL import Image
+import io
+import base64
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
@@ -181,10 +184,21 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text, reply_markup = await build_main_menu(user.id, user.first_name)
 
     if not welcome_text:
-        await query.edit_message_text("⚠️ Ошибка получения данных. Попробуйте /start")
+        error_text = "⚠️ Ошибка получения данных. Попробуйте /start"
+
+        if query.message.photo:
+            await query.message.delete()
+            await context.bot.send_message(user.id, error_text)
+        else:
+            await query.edit_message_text(error_text)
         return
 
-    await query.edit_message_text(welcome_text, reply_markup=reply_markup)
+    # Проверяем тип сообщения
+    if query.message.photo:
+        await query.message.delete()
+        await context.bot.send_message(user.id, welcome_text, reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(welcome_text, reply_markup=reply_markup)
 
 
 # МЕНЮ КОМАНД
@@ -374,7 +388,7 @@ async def upload_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "⚠️ Ошибка подключения к серверу.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Назад", callback_data="upload_file")
+                    InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")
                 ]])
             )
             return ConversationHandler.END
@@ -402,7 +416,7 @@ async def upload_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += "💎 Увеличьте лимиты — купите подписку уровнем выше!"
                 keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -423,7 +437,7 @@ async def upload_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 text += "Дневной лимит обновится завтра."
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -435,7 +449,7 @@ async def upload_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Отправьте ваш текст в следующем сообщении:
 """
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="upload_file")]]
+    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup)
@@ -447,7 +461,7 @@ async def handle_text_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Проверяем, что это только текст
     if update.message.photo or update.message.document or update.message.video:
-        keyboard = [[InlineKeyboardButton("◀️ Назад к выбору типа", callback_data="upload_file")]]
+        keyboard = [[InlineKeyboardButton("◀️ Назад к выбору типа", callback_data="exit_upload")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
     text_content = update.message.text
@@ -638,33 +652,55 @@ async def my_texts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Формируем список с лимитом
-    files_text = f"📝 Мои тексты:\n\n"
+    # Разбиваем на страницы
+    items_per_page = 15
+    total_pages = (len(texts) + items_per_page - 1) // items_per_page
 
-    keyboard = []
+    # Формируем страницы
+    for page in range(total_pages):
+        start_idx = page * items_per_page
+        end_idx = min(start_idx + items_per_page, len(texts))
+        page_texts = texts[start_idx:end_idx]
 
-    for doc in texts:
-        # Превью (первые 100 символов)
-        preview = doc["extracted_text"][:100]
-        if len(doc.get("extracted_text", "")) > 100:
-            preview += "..."
+        is_first_page = (page == 0)
+        is_last_page = (page == total_pages - 1)
 
-        datetime_str = doc['upload_date'][:16].replace('T', ' ')
-        files_text += f"📝 Текст {doc['id']}\n"
-        files_text += f"<blockquote>{preview}</blockquote>\n"
-        files_text += f"📅 {datetime_str}\n\n"
+        # Формируем текст страницы
+        if total_pages > 1:
+            files_text = f"📝 Мои тексты ({len(texts)}) — страница {page + 1}/{total_pages}\n\n"
+        else:
+            files_text = f"📝 Мои тексты:\n\n"
 
-        keyboard.append([
-            InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
-            InlineKeyboardButton(f"🗑 Удалить текст {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
-        ])
+        keyboard = []
 
-    keyboard.append([InlineKeyboardButton("📤 Загрузить текст", callback_data="upload_text")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+        for doc in page_texts:
+            # Превью (первые 100 символов)
+            preview = doc["extracted_text"][:100]
+            if len(doc.get("extracted_text", "")) > 100:
+                preview += "..."
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+            datetime_str = doc['upload_date'][:16].replace('T', ' ')
+            files_text += f"📝 Текст {doc['id']}\n"
+            files_text += f"<blockquote>{preview}</blockquote>\n"
+            files_text += f"📅 {datetime_str}\n\n"
 
-    await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML")
+            keyboard.append([
+                InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
+                InlineKeyboardButton(f"🗑 Удалить текст {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
+            ])
+
+        # Кнопки навигации только на последней странице
+        if is_last_page:
+            keyboard.append([InlineKeyboardButton("📤 Загрузить текст", callback_data="upload_text")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Первую страницу редактируем, остальные отправляем новыми
+        if is_first_page:
+            await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await context.bot.send_message(user.id, files_text, reply_markup=reply_markup, parse_mode="HTML")
 
 # Список видео в базе знаний
 async def my_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -704,34 +740,56 @@ async def my_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Формируем список
-    files_text = f"🎥 Мои видео:\n\n"
-    keyboard = []
+    # Разбиваем на страницы (15 видео на страницу)
+    items_per_page = 15
+    total_pages = (len(videos) + items_per_page - 1) // items_per_page
 
-    for doc in videos:
-        # Превью транскрипции (первые 100 символов)
-        preview = doc.get("extracted_text", "")[:100]
-        if len(doc.get("extracted_text", "")) > 100:
-            preview += "..."
+    # Формируем страницы
+    for page in range(total_pages):
+        start_idx = page * items_per_page
+        end_idx = min(start_idx + items_per_page, len(videos))
+        page_videos = videos[start_idx:end_idx]
 
-        datetime_str = doc['upload_date'][:16].replace('T', ' ')
+        is_first_page = (page == 0)
+        is_last_page = (page == total_pages - 1)
 
-        files_text += f"🎥 Видео {doc['id']}: <a href='{doc['file_url']}'>{doc['filename']}</a>\n"
-        files_text += f"<blockquote>{preview}</blockquote>\n"
-        files_text += f"📅 {datetime_str}\n\n"
+        # Формируем текст страницы
+        if total_pages > 1:
+            files_text = f"🎥 Мои видео ({len(videos)}) — страница {page + 1}/{total_pages}\n\n"
+        else:
+            files_text = f"🎥 Мои видео:\n\n"
 
-        keyboard.append([
-            InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
-            InlineKeyboardButton(f"🗑 Удалить {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
-        ])
+        keyboard = []
 
-    keyboard.append([InlineKeyboardButton("📤 Загрузить видео", callback_data="upload_video")])
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+        for doc in page_videos:
+            # Превью транскрипции (первые 100 символов)
+            preview = doc.get("extracted_text", "")[:100]
+            if len(doc.get("extracted_text", "")) > 100:
+                preview += "..."
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+            datetime_str = doc['upload_date'][:16].replace('T', ' ')
 
-    await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML", disable_web_page_preview=True)
+            files_text += f"🎥 Видео {doc['id']}: <a href='{doc['file_url']}'>{doc['filename']}</a>\n"
+            files_text += f"<blockquote>{preview}</blockquote>\n"
+            files_text += f"📅 {datetime_str}\n\n"
 
+            keyboard.append([
+                InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
+                InlineKeyboardButton(f"🗑 Удалить {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
+            ])
+
+        # Кнопки навигации только на последней странице
+        if is_last_page:
+            keyboard.append([InlineKeyboardButton("📤 Загрузить видео", callback_data="upload_video")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Первую страницу редактируем, остальные отправляем новыми
+        if is_first_page:
+            await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            await context.bot.send_message(user.id, files_text, reply_markup=reply_markup, parse_mode="HTML", disable_web_page_preview=True)
 
 # Загрузка видео в базу знаний
 async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -750,7 +808,7 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "⚠️ Ошибка подключения к серверу.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Назад", callback_data="upload_file")
+                    InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")
                 ]])
             )
             return ConversationHandler.END
@@ -780,7 +838,7 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 text += "Вы на максимальном тарифе. Удалите старые видео, чтобы загрузить новые."
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -801,7 +859,7 @@ async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 text += "Дневной лимит обновится завтра."
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -831,7 +889,7 @@ https://disk.yandex.ru/i/XXXXXX
 Не более 10 ссылок за один раз!
 """
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="upload_file")]]
+    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
@@ -897,7 +955,6 @@ def _get_video_info_sync(url: str, timeout: int = 15) -> tuple:
 
 # Получение длительности видео с таймаутом
 async def get_video_duration(url: str) -> tuple:
-
     try:
         # Если это прямая ссылка — используем ffprobe
         if re.search(r'\.(mp4|mkv|avi|mov|webm)(\?|$)', url):
@@ -1106,7 +1163,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 text += "Удалите старые видео, чтобы освободить место."
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -1130,7 +1187,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 text += "Дневной лимит обновится завтра."
 
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="upload_file")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
 
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
@@ -1186,6 +1243,368 @@ async def handle_wrong_media_in_video(update: Update, context: ContextTypes.DEFA
 
     return WAITING_VIDEO  # Остаёмся в состоянии ожидания
 
+# Конвертация фото в JPEG
+def convert_to_jpeg_for_ocr(photo_bytes: bytes) -> str:
+
+    try:
+        # Открываем изображение
+        image = Image.open(io.BytesIO(photo_bytes))
+
+        # Конвертируем в RGB (если PNG с прозрачностью)
+        if image.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+            image = background
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        # Сохраняем в JPEG
+        output = io.BytesIO()
+        image.save(output, format='JPEG', quality=100, optimize=True)
+        jpeg_bytes = output.getvalue()
+
+        # Конвертируем в base64
+        jpeg_base64 = base64.b64encode(jpeg_bytes).decode('utf-8')
+
+        return jpeg_base64
+
+    except Exception as e:
+        print(f"❌ Ошибка конвертации в JPEG: {e}")
+        raise
+
+# Глобальный обработчик фото
+async def global_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Проверяем, ждём ли мы фото от этого юзера
+    if context.user_data.get('waiting_for_photos'):
+
+        if 'photo_buffer' not in context.user_data:
+            context.user_data['photo_buffer'] = []
+
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+        jpeg_base64 = convert_to_jpeg_for_ocr(bytes(photo_bytes))
+        filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+
+        context.user_data['photo_buffer'].append({
+            "base64": jpeg_base64,
+            "filename": filename
+        })
+
+        count = len(context.user_data['photo_buffer'])
+
+        if count == 1:
+            status_msg = await update.message.reply_text(f"⏳ Получено фото: {count}")
+            context.user_data['status_msg_id'] = status_msg.message_id
+        else:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user.id,
+                    message_id=context.user_data['status_msg_id'],
+                    text=f"⏳ Получено фото: {count}"
+                )
+            except:
+                pass
+
+        # Отменяем старый таймер
+        if 'timer' in context.user_data and context.user_data['timer']:
+            context.user_data['timer'].cancel()
+
+        # Новый таймер на 3 секунды
+        async def finish_upload():
+            await asyncio.sleep(3)
+
+            photos = context.user_data['photo_buffer']
+            total = len(photos)
+
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user.id,
+                    message_id=context.user_data['status_msg_id'],
+                    text=f"⏳ Отправляю {total} фото на обработку..."
+                )
+            except:
+                pass
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{API_URL}/kb/upload/photos",
+                    json={"telegram_id": user.id, "photos": photos},
+                    timeout=60.0
+                )
+
+            if response.status_code == 200:
+                keyboard = [
+                    [InlineKeyboardButton("📤 Загрузить ещё фото", callback_data="upload_photo")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")]
+                ]
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=user.id,
+                        message_id=context.user_data['status_msg_id'],
+                        text=f"✅ {total} фото отправлено на обработку!\n\nУведомление придет после распознавания",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except:
+                    pass
+            else:
+                await context.bot.send_message(user.id, "⚠️ Ошибка загрузки")
+
+            # ВАЖНО: Выключаем режим ожидания фото
+            context.user_data['waiting_for_photos'] = False
+            context.user_data['photo_buffer'] = []
+
+        context.user_data['timer'] = asyncio.create_task(finish_upload())
+
+# Загрузка фото в базу знаний
+async def upload_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+
+    # Получаем статистику для проверки лимитов
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{API_URL}/users/{user.id}/stats")
+            stats = response.json()
+        except Exception as e:
+            print(f"❌ Ошибка получения статистики по лимитам на фото: {e}")
+
+            error_text = "⚠️ Ошибка подключения к серверу."
+            keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")]]
+
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, error_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await query.edit_message_text(error_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Проверяем лимиты
+    kb_storage = stats["kb_storage"]
+    kb_daily = stats["kb_daily"]
+    subscription_tier = stats["subscription_tier"]
+
+    storage_photos = kb_storage.get("photos", "0/0")
+    daily_photos = kb_daily.get("photos", "0/0")
+
+    # Проверяем хранилище
+    if "∞" not in storage_photos:
+        storage_current, storage_limit = map(int, storage_photos.split("/"))
+        if storage_current >= storage_limit:
+            text = "⚠️ Хранилище фото заполнено!\n\n"
+            text += f"Использовано: {storage_current}/{storage_limit}\n\n"
+
+            keyboard = []
+
+            if subscription_tier not in ["ultra", "admin"]:
+                text += "💎 Увеличьте лимиты — купите подписку уровнем выше!"
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += "Вы на максимальном тарифе. Удалите старые фото, чтобы загрузить новые."
+
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
+
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Проверяем дневной лимит
+    if "∞" not in daily_photos:
+        daily_current, daily_limit = map(int, daily_photos.split("/"))
+        if daily_current >= daily_limit:
+            text = "⚠️ Дневной лимит загрузки фото исчерпан!\n\n"
+            text += f"Использовано сегодня: {daily_current}/{daily_limit}\n\n"
+
+            keyboard = []
+
+            if subscription_tier not in ["ultra", "admin"]:
+                text += "💎 Увеличьте лимиты — купите подписку уровнем выше!"
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += "Дневной лимит обновится завтра."
+
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
+
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Лимиты не переполнены — предлагаем загрузить фото
+    text = """🖼 Загрузка фото\n\nОтправьте <b>в одном сообщении</b> до 10 фото с текстом, который нужно распознать.\n\nПоддерживаемые форматы: JPG, PNG"""
+
+    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+
+    if query.message.photo:
+        await query.message.delete()
+        await context.bot.send_message(user.id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    else:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+    # Включаем режим ожидания фото
+    context.user_data['waiting_for_photos'] = True
+
+    return ConversationHandler.END
+
+# Просмотр загруженных фото
+async def my_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_URL}/kb/documents/{user.id}")
+
+        if response.status_code == 200:
+            data = response.json()
+            documents = data.get("documents", [])
+
+            # Фильтруем только фото со статусом completed
+            photos = [doc for doc in documents if doc["file_type"] == "photo" and doc["status"] == "completed"]
+
+            if not photos:
+                text = "🖼 У вас пока нет фото в базе знаний."
+                keyboard = [
+                    [InlineKeyboardButton("📤 Загрузить фото", callback_data="upload_photo")],
+                    [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
+                ]
+
+                if query.message.photo:
+                    await query.message.delete()
+                    await context.bot.send_message(user.id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+                else:
+                    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+
+            # Сортируем по дате (новые сверху)
+            photos.sort(key=lambda x: x["upload_date"], reverse=True)
+
+            # Разбиваем на страницы
+            # Каждый элемент: ~200 символов текста + 2 строки кнопок
+            # Лимит Telegram: 4096 символов текста + 100 кнопок
+            # Безопасно: ~15 фото на страницу
+            items_per_page = 15
+            total_pages = (len(photos) + items_per_page - 1) // items_per_page
+
+            # Формируем страницы
+            for page in range(total_pages):
+                start_idx = page * items_per_page
+                end_idx = min(start_idx + items_per_page, len(photos))
+                page_photos = photos[start_idx:end_idx]
+
+                is_first_page = (page == 0)
+                is_last_page = (page == total_pages - 1)
+
+                # Формируем текст страницы
+                if total_pages > 1:
+                    files_text = f"🖼 Мои фото ({len(photos)}) — страница {page + 1}/{total_pages}\n\n"
+                else:
+                    files_text = f"🖼 Мои фото ({len(photos)}):\n\n"
+
+                keyboard = []
+
+                for doc in page_photos:
+                    # Превью текста (первые 100 символов)
+                    preview = doc.get("extracted_text", "[Текст не распознан]")[:100]
+                    if len(doc.get("extracted_text", "")) > 100:
+                        preview += "..."
+
+                    datetime_str = doc['upload_date'][:16].replace('T', ' ')
+                    files_text += f"🖼 Фото {doc['id']}\n"
+                    files_text += f"<blockquote>{preview}</blockquote>\n"
+                    files_text += f"📅 {datetime_str}\n\n"
+
+                    keyboard.append([
+                        InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
+                        InlineKeyboardButton(f"🖼 Показать фото {doc['id']}", callback_data=f"show_photo_{doc['id']}")
+                    ])
+                    keyboard.append([
+                        InlineKeyboardButton(f"🗑 Удалить {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
+                    ])
+
+                # Кнопки навигации только на последней странице
+                if is_last_page:
+                    keyboard.append([InlineKeyboardButton("📤 Загрузить фото", callback_data="upload_photo")])
+                    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                # Первую страницу редактируем, остальные отправляем новыми
+                if is_first_page:
+                    if query.message.photo:
+                        await query.message.delete()
+                        await context.bot.send_message(user.id, files_text, reply_markup=reply_markup,
+                                                       parse_mode="HTML")
+                    else:
+                        await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML")
+                else:
+                    await context.bot.send_message(user.id, files_text, reply_markup=reply_markup, parse_mode="HTML")
+
+        else:
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, "⚠️ Ошибка получения списка фото.")
+            else:
+                await query.edit_message_text("⚠️ Ошибка получения списка фото.")
+
+    except Exception as e:
+        print(f"Ошибка получения фото: {e}")
+        try:
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, "⚠️ Произошла ошибка.")
+            else:
+                await query.edit_message_text("⚠️ Произошла ошибка.")
+        except:
+            pass
+
+# Показать оригинальное фото
+async def show_photo_original(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    document_id = int(query.data.split("_")[-1])
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Получаем presigned URL
+            photo_response = await client.get(f"{API_URL}/kb/photo/{document_id}/presigned")
+
+            if photo_response.status_code != 200:
+                await query.answer("⚠️ Не удалось загрузить фото.", show_alert=True)
+                return
+
+            photo_data = photo_response.json()
+            photo_url = photo_data["presigned_url"]
+
+            keyboard = [
+                [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_doc_{document_id}")]
+            ]
+
+            # Отправляем фото
+            await query.message.reply_photo(
+                photo=photo_url,
+                caption="🖼 Оригинальное фото",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    except Exception as e:
+        print(f"Ошибка показа фото: {e}")
+        await query.answer("⚠️ Произошла ошибка.", show_alert=True)
+
 # Просмотр полного текста файла
 async def view_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1222,17 +1641,55 @@ async def view_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = "📝 Полный текст"
             full_text = f"{title} {doc_id}\n\n{document['extracted_text']}"
 
-            # Telegram ограничивает 4096 символов
-            if len(full_text) > 4000:
-                full_text = full_text[:3996] + "\n\n⚠️ Текст обрезан. Телеграм ограничивает длину сообщений!"
+            # Разбиваем на части по 4000 символов
+            max_length = 4000
+            text_parts = []
 
-            keyboard = [
-                [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_doc_{doc_id}")],
-                [InlineKeyboardButton("◀️ Назад к списку", callback_data=back_callback)]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            for i in range(0, len(full_text), max_length):
+                text_parts.append(full_text[i:i + max_length])
 
-            await query.edit_message_text(full_text, reply_markup=reply_markup)
+            # Инициализируем хранилище для message_id
+            if 'doc_messages' not in context.user_data:
+                context.user_data['doc_messages'] = {}
+
+            # Список для хранения ID отправленных сообщений
+            message_ids = []
+
+            # Отправляем части
+            total_parts = len(text_parts)
+
+            for i, part in enumerate(text_parts):
+                is_last = (i == total_parts - 1)
+
+                if is_last:
+                    # Последнее сообщение с кнопками
+                    keyboard = [
+                        [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_doc_{doc_id}")],
+                        [InlineKeyboardButton("◀️ Назад к списку", callback_data=back_callback)]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    if i == 0:
+                        # Единственное сообщение - редактируем
+                        edited_msg = await query.edit_message_text(part, reply_markup=reply_markup)
+                        message_ids.append(edited_msg.message_id)
+                    else:
+                        # Последняя часть - отправляем новое
+                        sent_msg = await query.message.reply_text(part, reply_markup=reply_markup)
+                        message_ids.append(sent_msg.message_id)
+                else:
+                    # Промежуточные сообщения без кнопок
+                    if i == 0:
+                        # Первое сообщение - редактируем
+                        edited_msg = await query.edit_message_text(part)
+                        message_ids.append(edited_msg.message_id)
+                    else:
+                        # Последующие части - новые сообщения
+                        sent_msg = await query.message.reply_text(part)
+                        message_ids.append(sent_msg.message_id)
+
+            # Сохраняем ID всех сообщений для этого документа
+            context.user_data['doc_messages'][doc_id] = message_ids
 
         except Exception as e:
             print(f"Ошибка просмотра документа: {e}")
@@ -1258,7 +1715,11 @@ async def delete_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             document = next((d for d in documents if d["id"] == doc_id), None)
 
             if not document:
-                await query.edit_message_text("⚠️ Документ не найден.")
+                if query.message.photo:
+                    await query.message.delete()
+                    await context.bot.send_message(user.id, "⚠️ Документ не найден.")
+                else:
+                    await query.edit_message_text("⚠️ Документ не найден.")
                 return
 
             file_type = document['file_type']
@@ -1267,6 +1728,20 @@ async def delete_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_response = await client.delete(f"{API_URL}/kb/documents/{doc_id}")
 
             if delete_response.status_code == 200:
+                # Удаляем предыдущие сообщения (если они были сохранены)
+                if 'doc_messages' in context.user_data and doc_id in context.user_data['doc_messages']:
+                    message_ids = context.user_data['doc_messages'][doc_id]
+
+                    # Удаляем все сообщения кроме последнего
+                    for msg_id in message_ids[:-1]:
+                        try:
+                            await context.bot.delete_message(chat_id=user.id, message_id=msg_id)
+                        except Exception as e:
+                            print(f"⚠️ Не удалось удалить сообщение {msg_id}: {e}")
+
+                    # Очищаем сохранённые ID
+                    del context.user_data['doc_messages'][doc_id]
+
                 # Определяем куда возвращаться
                 back_callbacks = {
                     'text': 'my_texts',
@@ -1279,23 +1754,51 @@ async def delete_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard = [[InlineKeyboardButton("◀️ Назад к списку", callback_data=back_callback)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                await query.edit_message_text(
-                    f"✅ Текст успешно удалён из базы знаний!",
-                    reply_markup=reply_markup
-                )
+                # Проверяем тип сообщения
+                if query.message.photo:
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        user.id,
+                        f"✅ Текст успешно удалён из базы знаний!",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    # Редактируем последнее сообщение (где была кнопка "Удалить")
+                    await query.edit_message_text(
+                        f"✅ Текст успешно удалён из базы знаний!",
+                        reply_markup=reply_markup
+                    )
             else:
-                await query.edit_message_text("⚠️ Ошибка при удалении.")
+                if query.message.photo:
+                    await query.message.delete()
+                    await context.bot.send_message(user.id, "⚠️ Ошибка при удалении.")
+                else:
+                    await query.edit_message_text("⚠️ Ошибка при удалении.")
 
         except Exception as e:
             print(f"Ошибка удаления документа: {e}")
-            await query.edit_message_text("⚠️ Ошибка подключения к серверу.")
+            if query.message.photo:
+                await query.message.delete()
+                await context.bot.send_message(user.id, "⚠️ Ошибка подключения к серверу.")
+            else:
+                await query.edit_message_text("⚠️ Ошибка подключения к серверу.")
 
 # Выход из загрузки медиа или текста в меню выбора типа
 async def exit_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Выключаем режим ожидания фото (если был включен)
+    context.user_data['waiting_for_photos'] = False
+    context.user_data['photo_buffer'] = []
+
+    # Отменяем таймер если есть
+    if 'timer' in context.user_data and context.user_data['timer']:
+        context.user_data['timer'].cancel()
+
+    # Вызываем меню загрузки файлов
     await upload_file_menu(update, context)
+
     return ConversationHandler.END
 
 
@@ -1348,6 +1851,8 @@ def main():
     )
     app.add_handler(upload_video_handler)
 
+    app.add_handler(MessageHandler(filters.PHOTO, global_photo_handler), group=0)
+
     # Callback кнопки
     app.add_handler(CallbackQueryHandler(subscriptions_menu, pattern="^subscriptions$"))
     app.add_handler(CallbackQueryHandler(knowledge_base_menu, pattern="^knowledge_base$"))
@@ -1358,6 +1863,10 @@ def main():
     app.add_handler(CallbackQueryHandler(view_document, pattern="^view_doc_"))
     app.add_handler(CallbackQueryHandler(delete_document, pattern="^delete_doc_"))
     app.add_handler(CallbackQueryHandler(my_videos, pattern="^my_videos$"))
+    app.add_handler(CallbackQueryHandler(my_photos, pattern="^my_photos$"))
+    app.add_handler(CallbackQueryHandler(show_photo_original, pattern="^show_photo_"))
+    app.add_handler(CallbackQueryHandler(upload_photo, pattern="^upload_photo$"))
+    app.add_handler(CallbackQueryHandler(exit_upload, pattern="^exit_upload$"))
 
     print("🤖 Бот запущен!")
     app.run_polling()
@@ -1367,3 +1876,5 @@ if __name__ == "__main__":
     main()
 
 # TODO: в коде найти все проверки на 0/inf и заменить их на проверку вхождения inf в строку
+# TODO: везде где пользователь при загрузке файла получает ошибку или лимит, нужно проверить,
+#  чтобы было exit_upload а не menu_upload, иначе хендлер не прервется

@@ -105,3 +105,14 @@ class VideoStatusResponse(BaseModel):
     status: str
     progress: Optional[str] = None
     error: Optional[str] = None
+
+# Запрос на загрузку фото
+class PhotoUploadRequest(BaseModel):
+    telegram_id: int
+    photos: list[dict]  # [{"base64": "...", "filename": "..."}, ...]
+
+# Ответ после загрузки фото
+class PhotoUploadResponse(BaseModel):
+    success: bool
+    uploaded_count: int
+    task_ids: list[str]

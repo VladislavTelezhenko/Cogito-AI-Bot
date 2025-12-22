@@ -1,8 +1,5 @@
 # Инструкция по инициализации таблиц и полей в базе данных PostgreSQL
 
-# TODO: сделать связи между таблицами для ускорения запросов from sqlalchemy.orm import relationship
-# TODO: сделать таблицу пресетов пользователей для контекста ИИ
-
 from sqlalchemy import Column, Integer, String, DateTime, Float, Text, Boolean, ForeignKey
 from datetime import datetime
 from database import Base

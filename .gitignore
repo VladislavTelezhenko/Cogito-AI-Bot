@@ -1,6 +1,7 @@
 # Секретные данные
 .env
 key.json
+ocr_key.json
 
 # Python
 __pycache__/
