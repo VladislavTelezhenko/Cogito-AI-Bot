@@ -2,6 +2,7 @@
 .env
 key.json
 ocr_key.json
+admin_seed.py
 
 # Python
 __pycache__/
