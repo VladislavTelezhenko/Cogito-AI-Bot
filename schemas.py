@@ -116,3 +116,14 @@ class PhotoUploadResponse(BaseModel):
     success: bool
     uploaded_count: int
     task_ids: list[str]
+
+# Запрос на загрузку файлов
+class FileUploadRequest(BaseModel):
+    telegram_id: int
+    files: list[dict]  # [{"filename": "...", "file_bytes": "base64...", "mime_type": "..."}, ...]
+
+# Ответ после загрузки файлов
+class FileUploadResponse(BaseModel):
+    success: bool
+    uploaded_count: int
+    task_ids: list[str]

@@ -1278,6 +1278,16 @@ def convert_to_jpeg_for_ocr(photo_bytes: bytes) -> str:
 async def global_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
+    # Если ждём файлы — отклоняем фото
+    if context.user_data.get('waiting_for_files'):
+        await update.message.reply_text(
+            "⚠️ Ожидаю файлы (TXT, PDF, DOCX), а не фото!",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")
+            ]])
+        )
+        return
+
     # Проверяем, ждём ли мы фото от этого юзера
     if context.user_data.get('waiting_for_photos'):
 
@@ -1788,19 +1798,372 @@ async def exit_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Выключаем режим ожидания фото (если был включен)
+    # Выключаем режим ожидания фото
     context.user_data['waiting_for_photos'] = False
     context.user_data['photo_buffer'] = []
+
+    # Выключаем режим ожидания файлов
+    context.user_data['waiting_for_files'] = False
+    context.user_data['file_buffer'] = []
 
     # Отменяем таймер если есть
     if 'timer' in context.user_data and context.user_data['timer']:
         context.user_data['timer'].cancel()
 
-    # Вызываем меню загрузки файлов
     await upload_file_menu(update, context)
+    return ConversationHandler.END
+
+# Загрузка файлов в базу знаний
+async def upload_file_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+
+    # Получаем статистику для проверки лимитов
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{API_URL}/users/{user.id}/stats")
+            stats = response.json()
+        except Exception as e:
+            print(f"❌ Ошибка получения статистики по лимитам на файлы: {e}")
+
+            error_text = "⚠️ Ошибка подключения к серверу."
+            keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")]]
+
+            await query.edit_message_text(error_text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Проверяем лимиты
+    kb_storage = stats["kb_storage"]
+    kb_daily = stats["kb_daily"]
+    subscription_tier = stats["subscription_tier"]
+
+    storage_files = kb_storage.get("files", "0/0")
+    daily_files = kb_daily.get("files", "0/0")
+
+    # Проверяем хранилище
+    if "∞" not in storage_files:
+        storage_current, storage_limit = map(int, storage_files.split("/"))
+        if storage_current >= storage_limit:
+            text = "⚠️ Хранилище файлов заполнено!\n\n"
+            text += f"Использовано: {storage_current}/{storage_limit}\n\n"
+
+            keyboard = []
+
+            if subscription_tier not in ["ultra", "admin"]:
+                text += "💎 Увеличьте лимиты — купите подписку уровнем выше!"
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += "Вы на максимальном тарифе. Удалите старые файлы, чтобы загрузить новые."
+
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
+
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Проверяем дневной лимит
+    if "∞" not in daily_files:
+        daily_current, daily_limit = map(int, daily_files.split("/"))
+        if daily_current >= daily_limit:
+            text = "⚠️ Дневной лимит загрузки файлов исчерпан!\n\n"
+            text += f"Использовано сегодня: {daily_current}/{daily_limit}\n\n"
+
+            keyboard = []
+
+            if subscription_tier not in ["ultra", "admin"]:
+                text += "💎 Увеличьте лимиты — купите подписку уровнем выше!"
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += "Дневной лимит обновится завтра."
+
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
+
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return ConversationHandler.END
+
+    # Лимиты не переполнены — предлагаем загрузить файлы
+    text = """📄 Загрузка файлов
+
+Отправьте до 10 файлов <b>в одном сообщении</b>.
+
+Поддерживаемые форматы:
+- TXT
+- PDF
+- DOCX
+
+Максимальный размер: 20 MB на файл"""
+
+    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+    # Включаем режим ожидания файлов
+    context.user_data['waiting_for_files'] = True
+    context.user_data['file_buffer'] = []
 
     return ConversationHandler.END
 
+
+async def reject_text_when_waiting_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('waiting_for_files'):
+        await update.message.reply_text(
+            "⚠️ Ожидаю файлы (TXT, PDF, DOCX)!\n\n"
+            "Отправьте документы или нажмите кнопку ниже:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")
+            ]])
+        )
+
+async def reject_photo_when_waiting_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('waiting_for_files'):
+        await update.message.reply_text(
+            "⚠️ Ожидаю файлы (TXT, PDF, DOCX)!\n\n"
+            "Отправьте документы или нажмите кнопку ниже:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")
+            ]])
+        )
+
+# Глобальный обработчик документов
+async def global_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # СНАЧАЛА проверяем что это документ
+    if not update.message.document:
+        return
+
+    # ПОТОМ проверяем, ждём ли мы файлы
+    if not context.user_data.get('waiting_for_files'):
+        return
+
+    doc = update.message.document
+
+    # Валидация расширения
+    allowed_extensions = ['.txt', '.pdf', '.docx']
+    file_extension = os.path.splitext(doc.file_name)[1].lower()
+
+    if file_extension not in allowed_extensions:
+        await update.message.reply_text(
+            f"❌ Неподдерживаемый формат файла: {file_extension}\n\n"
+            f"✅ Поддерживаемые форматы: TXT, PDF, DOCX",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data="upload_file_menu")
+            ]])
+        )
+        return
+
+    # Проверяем размер (20 MB лимит)
+    MAX_FILE_SIZE = 20 * 1024 * 1024
+    if doc.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text(
+            f"⚠️ Файл слишком большой!\n\n"
+            f"Размер: {doc.file_size / (1024*1024):.2f} MB\n"
+            f"Максимум: 20 MB"
+        )
+        return
+
+    # Определяем MIME type по расширению
+    extension = doc.file_name.split('.')[-1].lower()
+    mime_map = {
+        'txt': 'text/plain',
+        'pdf': 'application/pdf',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    }
+
+    mime_type = mime_map.get(extension)
+
+    if not mime_type:
+        await update.message.reply_text(
+            f"⚠️ Неподдерживаемый формат!\n\n"
+            f"Файл: {doc.file_name}\n\n"
+            f"Поддерживаемые форматы: TXT, PDF, DOCX"
+        )
+        return
+
+    # Инициализируем буфер
+    if 'file_buffer' not in context.user_data:
+        context.user_data['file_buffer'] = []
+
+    # Скачиваем файл
+    file = await context.bot.get_file(doc.file_id)
+    file_bytes = await file.download_as_bytearray()
+    file_base64 = base64.b64encode(bytes(file_bytes)).decode('utf-8')
+
+    context.user_data['file_buffer'].append({
+        "filename": doc.file_name,
+        "file_bytes": file_base64,
+        "mime_type": mime_type
+    })
+
+    count = len(context.user_data['file_buffer'])
+
+    # Обновляем статус
+    if count == 1:
+        status_msg = await update.message.reply_text(f"⏳ Получено файлов: {count}")
+        context.user_data['status_msg_id'] = status_msg.message_id
+    else:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user.id,
+                message_id=context.user_data['status_msg_id'],
+                text=f"⏳ Получено файлов: {count}"
+            )
+        except:
+            pass
+
+    # Проверяем лимит (10 файлов)
+    if count >= 10:
+        await finish_file_upload(update, context)
+        return
+
+    # Отменяем старый таймер
+    if 'timer' in context.user_data and context.user_data['timer']:
+        context.user_data['timer'].cancel()
+
+    # Новый таймер на 3 секунды
+    async def finish_upload():
+        await asyncio.sleep(3)
+        await finish_file_upload(update, context)
+
+    context.user_data['timer'] = asyncio.create_task(finish_upload())
+
+
+# Завершение загрузки файлов
+async def finish_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user if update.message else update.effective_user
+
+    files = context.user_data.get('file_buffer', [])
+    total = len(files)
+
+    if total == 0:
+        return
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=user.id,
+            message_id=context.user_data['status_msg_id'],
+            text=f"⏳ Отправляю {total} файлов на обработку..."
+        )
+    except:
+        pass
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{API_URL}/kb/upload/files",
+            json={"telegram_id": user.id, "files": files},
+            timeout=120.0
+        )
+
+    if response.status_code == 200:
+        keyboard = [
+            [InlineKeyboardButton("📤 Загрузить ещё файлы", callback_data="upload_file_doc")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")]
+        ]
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user.id,
+                message_id=context.user_data['status_msg_id'],
+                text=f"✅ {total} файлов отправлено на обработку!\n\nУведомление придет после распознавания",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except:
+            pass
+    else:
+        await context.bot.send_message(user.id, "⚠️ Ошибка загрузки")
+
+    # Выключаем режим ожидания файлов
+    context.user_data['waiting_for_files'] = False
+    context.user_data['file_buffer'] = []
+
+
+# Список файлов в базе знаний
+async def my_files_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+
+    # Получаем все файлы
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{API_URL}/kb/documents/{user.id}")
+            data = response.json()
+            all_documents = data.get("documents", [])
+        except Exception as e:
+            print(f"Ошибка получения файлов: {e}")
+            await query.edit_message_text(
+                "⚠️ Ошибка получения данных.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Назад", callback_data="my_files")
+                ]])
+            )
+            return
+
+    # Фильтруем только файлы со статусом completed
+    files = [doc for doc in all_documents if doc["file_type"] == "file" and doc["status"] == "completed"]
+    files.sort(key=lambda x: x["upload_date"], reverse=True)
+
+    # Если файлов нет
+    if not files:
+        await query.edit_message_text(
+            "📄 У вас пока нет файлов!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📤 Загрузить файлы", callback_data="upload_file_doc")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
+            ])
+        )
+        return
+
+    # Разбиваем на страницы (15 файлов на страницу)
+    items_per_page = 15
+    total_pages = (len(files) + items_per_page - 1) // items_per_page
+
+    # Формируем страницы
+    for page in range(total_pages):
+        start_idx = page * items_per_page
+        end_idx = min(start_idx + items_per_page, len(files))
+        page_files = files[start_idx:end_idx]
+
+        is_first_page = (page == 0)
+        is_last_page = (page == total_pages - 1)
+
+        # Формируем текст страницы
+        if total_pages > 1:
+            files_text = f"📄 Мои файлы ({len(files)}) — страница {page + 1}/{total_pages}\n\n"
+        else:
+            files_text = f"📄 Мои файлы:\n\n"
+
+        keyboard = []
+
+        for doc in page_files:
+            # Превью текста (первые 100 символов)
+            preview = doc.get("extracted_text", "[Текст не распознан]")[:100]
+            if len(doc.get("extracted_text", "")) > 100:
+                preview += "..."
+
+            datetime_str = doc['upload_date'][:16].replace('T', ' ')
+            files_text += f"📄 {doc['filename']}\n"
+            files_text += f"<blockquote>{preview}</blockquote>\n"
+            files_text += f"📅 {datetime_str}\n\n"
+
+            keyboard.append([
+                InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}"),
+                InlineKeyboardButton(f"🗑 Удалить {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
+            ])
+
+        # Кнопки навигации только на последней странице
+        if is_last_page:
+            keyboard.append([InlineKeyboardButton("📤 Загрузить файлы", callback_data="upload_file_doc")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Первую страницу редактируем, остальные отправляем новыми
+        if is_first_page:
+            await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await context.bot.send_message(user.id, files_text, reply_markup=reply_markup, parse_mode="HTML")
 
 # ИНИЦИАЛИЗАЦИЯ БОТА
 def main():
@@ -1852,6 +2215,9 @@ def main():
     app.add_handler(upload_video_handler)
 
     app.add_handler(MessageHandler(filters.PHOTO, global_photo_handler), group=0)
+    app.add_handler(MessageHandler(filters.PHOTO, global_photo_handler), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reject_text_when_waiting_files), group=0)
+    app.add_handler(MessageHandler(filters.Document.ALL, global_document_handler), group=0)
 
     # Callback кнопки
     app.add_handler(CallbackQueryHandler(subscriptions_menu, pattern="^subscriptions$"))
@@ -1867,6 +2233,8 @@ def main():
     app.add_handler(CallbackQueryHandler(show_photo_original, pattern="^show_photo_"))
     app.add_handler(CallbackQueryHandler(upload_photo, pattern="^upload_photo$"))
     app.add_handler(CallbackQueryHandler(exit_upload, pattern="^exit_upload$"))
+    app.add_handler(CallbackQueryHandler(upload_file_doc, pattern="^upload_file_doc$"))
+    app.add_handler(CallbackQueryHandler(my_files_docs, pattern="^my_files_docs$"))
 
     print("🤖 Бот запущен!")
     app.run_polling()

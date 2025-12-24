@@ -14,6 +14,10 @@ import asyncio
 from iam_manager import get_new_iam_token
 import base64
 import json
+import io
+import subprocess
+from pdf2image import convert_from_bytes
+from docx import Document
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,14 +26,12 @@ load_dotenv()
 @celery_app.task
 def refresh_iam_token():
     get_new_iam_token()
-    print("🔄 IAM токен обновлён автоматически")
 
 # Периодическая задача обновления токена Vision (каждые 11 часов)
 @celery_app.task
 def refresh_vision_iam_token():
     from iam_manager import get_new_vision_iam_token
     get_new_vision_iam_token()
-    print("🔄 Vision IAM токен обновлён автоматически")
 
 
 # Настройка S3
@@ -411,3 +413,297 @@ def delete_photo_from_s3(s3_key: str) -> bool:
     except Exception as e:
         print(f"❌ Ошибка удаления фото из S3: {e}")
         return False
+
+
+# Загрузка файла в S3
+def upload_file_to_s3(file_base64: str, user_id: int, document_id: int, extension: str) -> str:
+    try:
+        # Декодируем base64
+        file_bytes = base64.b64decode(file_base64)
+
+        # Формируем путь в S3
+        s3_key = f"files/user_{user_id}/document_{document_id}.{extension}"
+
+        # Загружаем в S3
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=file_bytes
+        )
+
+        return s3_key
+
+    except Exception as e:
+        print(f"❌ Ошибка загрузки файла в S3: {e}")
+        raise
+
+
+# Удаление файла из S3
+def delete_file_from_s3(s3_key: str) -> bool:
+    try:
+        s3_client.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
+        print(f"✅ Файл удалён из S3: {s3_key}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка удаления файла из S3: {e}")
+        return False
+
+def recognize_text_yandex(image_bytes: bytes) -> str:
+    """OCR изображения через Yandex Vision"""
+    try:
+        vision_iam_token = os.getenv('YANDEX_VISION_IAM_TOKEN')
+        folder_id = os.getenv('YANDEX_FOLDER_ID')
+
+        headers = {
+            'Authorization': f'Bearer {vision_iam_token}',
+            'Content-Type': 'application/json'
+        }
+
+        # Конвертируем в base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+
+        body = {
+            "folderId": folder_id,
+            "analyze_specs": [
+                {
+                    "content": image_base64,
+                    "features": [
+                        {
+                            "type": "TEXT_DETECTION",
+                            "text_detection_config": {
+                                "language_codes": ["ru", "en"]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+        ocr_response = requests.post(
+            'https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze',
+            headers=headers,
+            json=body
+        )
+
+        if ocr_response.status_code != 200:
+            print(f"⚠️ Ошибка Vision API: {ocr_response.text}")
+            return ""
+
+        # Парсим результат
+        result = ocr_response.json()
+        extracted_text = ""
+
+        if 'results' in result and len(result['results']) > 0:
+            text_annotation = result['results'][0].get('results', [])
+
+            for item in text_annotation:
+                if item.get('textDetection'):
+                    pages = item['textDetection'].get('pages', [])
+                    for page in pages:
+                        blocks = page.get('blocks', [])
+                        for block in blocks:
+                            lines = block.get('lines', [])
+                            for line in lines:
+                                words = line.get('words', [])
+                                line_text = ' '.join([word.get('text', '') for word in words])
+                                extracted_text += line_text + '\n'
+
+        return extracted_text.strip()
+
+    except Exception as e:
+        print(f"❌ Ошибка OCR: {e}")
+        return ""
+
+# Извлечение текста из TXT
+def extract_text_from_txt(file_bytes: bytes) -> str:
+    try:
+        # Пробуем UTF-8
+        try:
+            text = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            # Пробуем CP1251 (кириллица Windows)
+            text = file_bytes.decode('cp1251')
+
+        return text.strip()
+
+    except Exception as e:
+        print(f"❌ Ошибка чтения TXT: {e}")
+        raise
+
+
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    """Извлекает текст из DOCX + OCR всех картинок"""
+    doc = Document(io.BytesIO(file_bytes))
+
+    # 1. Извлекаем текст
+    text_parts = [p.text for p in doc.paragraphs if p.text.strip()]
+
+    # 2. Извлекаем картинки и делаем OCR
+    image_texts = []
+    for rel in doc.part.rels.values():
+        if "image" in rel.target_ref:
+            image_data = rel.target_part.blob
+            # OCR через Yandex Vision
+            ocr_result = recognize_text_yandex(image_data)
+            if ocr_result:
+                image_texts.append(ocr_result)
+            time.sleep(0.5)  # Rate limit
+
+    # 3. Объединяем
+    all_text = "\n".join(text_parts)
+    if image_texts:
+        all_text += "\n\n=== ТЕКСТ ИЗ ИЗОБРАЖЕНИЙ ===\n" + "\n".join(image_texts)
+
+    return all_text
+
+# Извлечение текста из PDF через OCR
+def extract_text_from_pdf_ocr(pdf_bytes: bytes) -> str:
+    try:
+        # Конвертируем PDF в изображения
+        images = convert_from_bytes(pdf_bytes, dpi=300)
+
+        # OCR каждой страницы через Yandex Vision
+        vision_iam_token = os.getenv('YANDEX_VISION_IAM_TOKEN')
+        folder_id = os.getenv('YANDEX_FOLDER_ID')
+
+        headers = {
+            'Authorization': f'Bearer {vision_iam_token}',
+            'Content-Type': 'application/json'
+        }
+
+        all_text = []
+
+        for i, image in enumerate(images):
+            print(f"🔄 Обработка страницы {i + 1}/{len(images)}...")
+
+            # Конвертируем изображение в JPEG
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG', quality=95)
+            img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+
+            # OCR запрос
+            body = {
+                "folderId": folder_id,
+                "analyze_specs": [
+                    {
+                        "content": img_base64,
+                        "features": [
+                            {
+                                "type": "TEXT_DETECTION",
+                                "text_detection_config": {
+                                    "language_codes": ["ru", "en"]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+
+            ocr_response = requests.post(
+                'https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze',
+                headers=headers,
+                json=body
+            )
+
+            if ocr_response.status_code != 200:
+                print(f"⚠️ Ошибка OCR страницы {i + 1}: {ocr_response.text}")
+                continue
+
+            # Парсим результат
+            result = ocr_response.json()
+            page_text = ""
+
+            if 'results' in result and len(result['results']) > 0:
+                text_annotation = result['results'][0].get('results', [])
+
+                for item in text_annotation:
+                    if item.get('textDetection'):
+                        pages = item['textDetection'].get('pages', [])
+                        for page in pages:
+                            blocks = page.get('blocks', [])
+                            for block in blocks:
+                                lines = block.get('lines', [])
+                                for line in lines:
+                                    words = line.get('words', [])
+                                    line_text = ' '.join([word.get('text', '') for word in words])
+                                    page_text += line_text + '\n'
+
+            all_text.append(page_text)
+
+            # Пауза между запросами (чтобы не превысить rate limit)
+            time.sleep(0.5)
+
+        final_text = '\n\n'.join(all_text).strip()
+
+        if not final_text:
+            final_text = "[Текст не распознан]"
+
+        return final_text
+
+    except Exception as e:
+        print(f"❌ Ошибка извлечения текста из PDF: {e}")
+        raise
+
+
+# Celery задача обработки файла
+@celery_app.task(bind=True, max_retries=3)
+def process_file(self, document_id: int, s3_key: str, mime_type: str):
+    try:
+        update_document_status(document_id, "processing")
+
+        # Скачиваем файл из S3
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+        file_bytes = response['Body'].read()
+
+        extracted_text = ""
+
+        # Обрабатываем в зависимости от типа
+        if mime_type == "text/plain":
+            print("📝 Обработка TXT файла...")
+            extracted_text = extract_text_from_txt(file_bytes)
+
+        elif mime_type == "application/pdf":
+            print("📄 Обработка PDF файла...")
+            extracted_text = extract_text_from_pdf_ocr(file_bytes)
+
+        elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            print("📄 Обработка DOCX файла...")
+            extracted_text = extract_text_from_docx(file_bytes)
+
+        else:
+            raise Exception(f"Неподдерживаемый тип файла: {mime_type}")
+
+        # Сохраняем результат
+        update_document_status(document_id, "completed", transcription=extracted_text)
+
+        # Получаем данные для уведомления
+        api_url = os.getenv('API_URL', 'http://localhost:8000')
+        doc_response = httpx.get(f"{api_url}/kb/documents/{document_id}/info")
+
+        if doc_response.status_code == 200:
+            user_data = doc_response.json()
+            telegram_id = user_data['telegram_id']
+            filename = user_data['filename']
+
+            # Формируем уведомление
+            caption = f"✅ Файл обработан!\n\n📄 {filename}\n\n📝 Распознано символов: {len(extracted_text)}"
+
+            keyboard = [
+                [
+                    {"text": "📤 Загрузить ещё", "callback_data": "upload_file_doc"},
+                    {"text": "📄 Мои файлы", "callback_data": "my_files_docs"}
+                ],
+                [
+                    {"text": "🏠 Главное меню", "callback_data": "back_to_main"}
+                ]
+            ]
+
+            # Отправляем уведомление
+            asyncio.run(notify_user(telegram_id, caption, keyboard))
+
+        return {"status": "success", "document_id": document_id}
+
+    except Exception as e:
+        print(f"❌ Ошибка обработки файла: {e}")
+        update_document_status(document_id, "failed", str(e))
+        raise

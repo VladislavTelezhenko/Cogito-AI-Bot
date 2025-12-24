@@ -554,6 +554,136 @@ def get_photo_presigned_url_endpoint(document_id: int, db: Session = Depends(get
     }
 
 
+# Загрузка файлов в базу знаний
+@app.post("/kb/upload/files", response_model=schemas.FileUploadResponse)
+def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(get_db)):
+    # Находим пользователя
+    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Получаем подписку и тариф
+    subscription = db.query(models.UserSubscription).filter(
+        models.UserSubscription.user_id == user.id,
+        models.UserSubscription.status == "active"
+    ).first()
+
+    if not subscription:
+        raise HTTPException(status_code=400, detail="No active subscription")
+
+    tier = db.query(models.SubscriptionTier).filter(
+        models.SubscriptionTier.id == subscription.tier_id
+    ).first()
+
+    # Проверяем лимиты хранилища
+    total_files = db.query(func.count(models.UserDocument.id)).filter(
+        models.UserDocument.user_id == user.id,
+        models.UserDocument.file_type == "file",
+        models.UserDocument.status == "completed",
+        models.UserDocument.is_deleted == False
+    ).scalar()
+
+    if tier.files_limit != 9999 and total_files >= tier.files_limit:
+        raise HTTPException(status_code=400, detail="Storage limit exceeded")
+
+    # Проверяем дневной лимит
+    today = func.date(func.now())
+    daily_files = db.query(func.count(models.UserDocument.id)).filter(
+        models.UserDocument.user_id == user.id,
+        models.UserDocument.file_type == "file",
+        func.date(models.UserDocument.upload_date) == today
+    ).scalar()
+
+    if tier.daily_files != 9999 and daily_files >= tier.daily_files:
+        raise HTTPException(status_code=400, detail="Daily limit exceeded")
+
+    # Определяем приоритет
+    tier_name = tier.tier_name
+    priority = get_priority(tier_name)
+
+    # Создаём записи в БД для каждого файла и запускаем задачи
+    task_ids = []
+
+    from s3_storage import upload_file_to_s3, process_file
+
+    for file_data in data.files:
+        # Определяем расширение
+        extension = file_data['filename'].split('.')[-1].lower()
+
+        # Создаём запись в БД
+        new_doc = models.UserDocument(
+            user_id=user.id,
+            filename=file_data['filename'],
+            file_type="file",
+            status="pending",
+            extracted_text=None,
+            file_url=None,
+            duration_hours=None
+        )
+
+        db.add(new_doc)
+        db.commit()
+        db.refresh(new_doc)
+
+        # Загружаем файл в S3
+        s3_key = upload_file_to_s3(file_data['file_bytes'], user.id, new_doc.id, extension)
+
+        # Сохраняем S3 URL в БД
+        s3_url = f"https://storage.yandexcloud.net/{os.getenv('YC_BUCKET_NAME')}/{s3_key}"
+        new_doc.file_url = s3_url
+        db.commit()
+
+        # Запускаем Celery задачу с приоритетом
+        task = process_file.apply_async(
+            args=[new_doc.id, s3_key, file_data['mime_type']],
+            priority=priority
+        )
+        task_ids.append(task.id)
+
+    return {
+        "success": True,
+        "uploaded_count": len(data.files),
+        "task_ids": task_ids
+    }
+
+
+# Обновляем эндпоинт удаления (добавляем удаление файлов из S3)
+@app.delete("/kb/documents/{document_id}")
+def delete_document(document_id: int, db: Session = Depends(get_db)):
+    # Находим файл
+    document = db.query(models.UserDocument).filter(
+        models.UserDocument.id == document_id
+    ).first()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Если это фото или файл — удаляем из S3
+    if document.file_type in ["photo", "file"] and document.file_url:
+        bucket_name = os.getenv('YC_BUCKET_NAME')
+        try:
+            s3_key = document.file_url.split(f"{bucket_name}/")[1]
+
+            # Удаляем из S3
+            if document.file_type == "photo":
+                from s3_storage import delete_photo_from_s3
+                delete_photo_from_s3(s3_key)
+            elif document.file_type == "file":
+                from s3_storage import delete_file_from_s3
+                delete_file_from_s3(s3_key)
+        except Exception as e:
+            print(f"⚠️ Не удалось извлечь s3_key или удалить файл: {e}")
+
+    # Мягкое удаление с очисткой текста
+    document.is_deleted = True
+    document.deleted_at = datetime.now()
+    document.extracted_text = ""
+
+    db.commit()
+
+    return {"success": True, "message": "Document deleted"}
+
+
 # Запуск сервера
 if __name__ == "__main__":
     uvicorn.run(
