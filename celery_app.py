@@ -2,19 +2,19 @@
 # celery -A celery_app worker --beat --loglevel=info --pool=solo
 
 # Для работы Celery локально, нужно не забывать запускать redis-server.exe
+
 from celery import Celery
 from celery.schedules import crontab
-import os
-from dotenv import load_dotenv
+from config import settings
 
-load_dotenv()
-
+# Инициализация Celery
 celery_app = Celery(
     'cogito_bot',
-    broker=os.getenv('REDIS_URL'),
-    backend=os.getenv('REDIS_URL')
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL
 )
 
+# Конфигурация Celery
 celery_app.conf.update(
     task_serializer='json',
     accept_content=['json'],
@@ -22,7 +22,13 @@ celery_app.conf.update(
     timezone='Europe/Moscow',
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=3600*3
+    task_time_limit=3600 * 3,
+
+    # Настройки приоритизации задач
+    task_acks_late=True,  # Подтверждение после выполнения задачи
+    worker_prefetch_multiplier=1,  # Берёт по 1 задаче за раз
+    task_default_priority=5,  # Приоритет по умолчанию (средний)
+    task_queue_max_priority=10  # Максимальный приоритет (0=высший, 10=низший)
 )
 
 # Обновление токенов Яндекса каждые 11 часов
@@ -38,6 +44,5 @@ celery_app.conf.beat_schedule = {
 }
 
 # Импорт задач в конце, чтобы избежать циклической зависимости
-# между этим файлом и s3_storage
 if __name__ != '__main__':
     import s3_storage
