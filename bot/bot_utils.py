@@ -4,7 +4,7 @@ import logging
 import httpx
 from typing import Optional, Tuple, List, Dict, Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from config import settings, Messages, Limits, CONTENT_CONFIG, NOTIFICATION_TEMPLATES
+from shared.config import settings, Messages, Limits, CONTENT_CONFIG, NOTIFICATION_TEMPLATES
 import asyncio
 import os
 

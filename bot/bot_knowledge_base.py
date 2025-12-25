@@ -12,7 +12,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import ffmpeg
 
-from config import settings, CONTENT_CONFIG, Limits, Messages
+from shared.config import settings, CONTENT_CONFIG, Limits, Messages
 from bot_utils import (
     api_request,
     get_user_stats,

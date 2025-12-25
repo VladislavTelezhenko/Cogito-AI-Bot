@@ -10,7 +10,7 @@ from telegram.ext import (
     ConversationHandler
 )
 
-from config import settings, CONTENT_CONFIG
+from shared.config import settings, CONTENT_CONFIG
 from bot_utils import api_request, get_user_stats, logger
 
 # Импорт handlers из модулей

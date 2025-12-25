@@ -5,7 +5,7 @@
 
 from celery import Celery
 from celery.schedules import crontab
-from config import settings
+from shared.config import settings
 
 # Инициализация Celery
 celery_app = Celery(

@@ -1,7 +1,7 @@
 # Секретные данные
-.env
-key.json
-ocr_key.json
+secret/.env
+secret/
+logs/
 admin_seed.py
 
 # Python

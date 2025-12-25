@@ -11,12 +11,12 @@ import time
 import shutil
 import httpx
 import asyncio
-from iam_manager import get_new_iam_token, get_new_vision_iam_token
+from utils.iam_manager import get_new_iam_token, get_new_vision_iam_token
 import io
 import subprocess
 from pdf2image import convert_from_bytes
 from docx import Document
-from config import settings, DocumentStatus, NOTIFICATION_TEMPLATES
+from shared.config import settings, DocumentStatus, NOTIFICATION_TEMPLATES
 from typing import Optional, Tuple
 import logging
 import base64
