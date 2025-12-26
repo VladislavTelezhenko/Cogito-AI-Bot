@@ -1,5 +1,5 @@
 # Обработка асинхронных запросов на перевод видео в текст и обновление токена
-# celery -A celery_app worker --beat --loglevel=info --pool=solo
+# celery -A backend.celery_app worker --beat --loglevel=info --pool=solo
 
 # Для работы Celery локально, нужно не забывать запускать redis-server.exe
 
@@ -34,15 +34,15 @@ celery_app.conf.update(
 # Обновление токенов Яндекса каждые 11 часов
 celery_app.conf.beat_schedule = {
     'refresh-speechkit-token-every-11-hours': {
-        'task': 's3_storage.refresh_iam_token',
+        'task': 'backend.s3_storage.refresh_iam_token',
         'schedule': crontab(minute=0, hour='*/11'),
     },
     'refresh-vision-token-every-11-hours': {
-        'task': 's3_storage.refresh_vision_iam_token',
+        'task': 'backend.s3_storage.refresh_vision_iam_token',
         'schedule': crontab(minute=0, hour='*/11'),
     },
 }
 
 # Импорт задач в конце, чтобы избежать циклической зависимости
 if __name__ != '__main__':
-    import s3_storage
+    from backend import s3_storage

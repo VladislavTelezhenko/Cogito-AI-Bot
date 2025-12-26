@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Проверка готовности редиса
 def check_redis():
-    """Проверка подключения к Redis"""
+    # Проверка подключения к Redis
     try:
         r = redis.Redis(host='localhost', port=6379, db=0)
         r.ping()
@@ -54,6 +54,12 @@ def main():
         )
         processes.append(('Celery', celery))
 
+        logger.info("▶ Запуск Flower (мониторинг Celery)...")
+        flower = subprocess.Popen(
+            ['celery', '-A', 'backend.celery_app', 'flower', '--port=5555']
+        )
+        processes.append(('Flower', flower))
+
         logger.info("▶ Запуск Telegram бота...")
         bot = subprocess.Popen(
             ['python', '-m', 'bot.bot']
@@ -61,6 +67,11 @@ def main():
         processes.append(('Bot', bot))
 
         logger.info("✅ Все сервисы успешно запущены!")
+        logger.info("")
+        logger.info("🌐 Доступные интерфейсы:")
+        logger.info("   📡 API:    http://localhost:8000")
+        logger.info("   🌸 Flower: http://localhost:5555")
+        logger.info("")
 
         # Ждём завершения
         for name, proc in processes:
