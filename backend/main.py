@@ -6,14 +6,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, date
 import uvicorn
-from database import get_db, engine
-import models
-import schemas
-from celery_app import celery_app
+from backend.database import get_db, engine
+from backend import models, schemas
+from backend.celery_app import celery_app
 from celery.result import AsyncResult
-from s3_storage import process_video
+from backend.s3_storage import process_video
 from dotenv import load_dotenv
+from pathlib import Path
+from backend.limits_service import LimitsService
 import logging
+from shared.config import S3_BASE_URL, YC_BUCKET_NAME
+
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,7 +29,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+env_path = Path(__file__).parent.parent / 'secret' / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Инициализируем таблицы в БД
 models.Base.metadata.create_all(bind=engine)
@@ -89,6 +93,7 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
     return new_user
 
+
 # Получаем статистику пользователя для главного меню
 @app.get("/users/{telegram_id}/stats", response_model=schemas.UserStats)
 def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
@@ -103,8 +108,12 @@ def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
         logger.warning(f"Пользователь не найден: telegram_id={telegram_id}")
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Получаем активную подписку
-    active_subscription = db.query(models.UserSubscription).filter(
+    # Получаем активную подписку с тарифом (joinedload для одного запроса)
+    from sqlalchemy.orm import joinedload
+
+    active_subscription = db.query(models.UserSubscription).options(
+        joinedload(models.UserSubscription.tier)
+    ).filter(
         models.UserSubscription.user_id == user.id,
         models.UserSubscription.status == "active"
     ).first()
@@ -113,90 +122,68 @@ def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
         logger.error(f"У пользователя {telegram_id} нет активной подписки")
         raise HTTPException(status_code=404, detail="No active subscription")
 
-    # Получаем тариф
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == active_subscription.tier_id
-    ).first()
+    tier = active_subscription.tier
 
     # Считаем сообщения сегодня
-    today = date.today()
+    today = func.date(func.now())
     messages_today = db.query(models.UserDailyAction).filter(
         models.UserDailyAction.user_id == user.id,
         models.UserDailyAction.action_type == "ai_query",
         func.date(models.UserDailyAction.action_date) == today
     ).count()
 
-    # Считаем использование базы знаний
-    # Видео (часы)
-    video_hours = db.query(
-        func.coalesce(func.sum(models.UserDocument.duration_hours), 0)
+    # ОПТИМИЗАЦИЯ: Один запрос для всей статистики по документам
+    from sqlalchemy import case, and_
+
+    stats = db.query(
+        # Общее хранилище
+        func.coalesce(
+            func.sum(case((models.UserDocument.file_type == "video", models.UserDocument.duration_hours), else_=0)),
+            0
+        ).label("video_hours"),
+        func.count(case((models.UserDocument.file_type == "file", models.UserDocument.id))).label("files_count"),
+        func.count(case((models.UserDocument.file_type == "photo", models.UserDocument.id))).label("photos_count"),
+        func.count(case((models.UserDocument.file_type == "text", models.UserDocument.id))).label("texts_count"),
+
+        # Дневное использование
+        func.coalesce(
+            func.sum(case(
+                (and_(models.UserDocument.file_type == "video", func.date(models.UserDocument.upload_date) == today),
+                 models.UserDocument.duration_hours),
+                else_=0
+            )),
+            0
+        ).label("daily_video_hours"),
+        func.count(case(
+            (and_(models.UserDocument.file_type == "file", func.date(models.UserDocument.upload_date) == today),
+             models.UserDocument.id)
+        )).label("daily_files"),
+        func.count(case(
+            (and_(models.UserDocument.file_type == "photo", func.date(models.UserDocument.upload_date) == today),
+             models.UserDocument.id)
+        )).label("daily_photos"),
+        func.count(case(
+            (and_(models.UserDocument.file_type == "text", func.date(models.UserDocument.upload_date) == today),
+             models.UserDocument.id)
+        )).label("daily_texts"),
     ).filter(
         models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "video",
         models.UserDocument.status == "completed",
         models.UserDocument.is_deleted == False
-    ).scalar() or 0
+    ).first()
 
-    # Файлы (количество)
-    files_count = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "file",
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).count()
+    # Извлекаем значения из результата
+    video_hours = stats.video_hours or 0
+    files_count = stats.files_count or 0
+    photos_count = stats.photos_count or 0
+    texts_count = stats.texts_count or 0
+    daily_video_hours = stats.daily_video_hours or 0
+    daily_files = stats.daily_files or 0
+    daily_photos = stats.daily_photos or 0
+    daily_texts = stats.daily_texts or 0
 
-    # Фото (количество)
-    photos_count = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "photo",
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).count()
-
-    # Тексты (количество)
-    texts_count = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "text",
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).count()
-
-    # Считаем дневное использование загрузки
-    # Видео (часы за сегодня)
-    daily_video_hours = db.query(
-        func.coalesce(func.sum(models.UserDocument.duration_hours), 0)
-    ).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "video",
-        models.UserDocument.status == "completed",
-        func.date(models.UserDocument.upload_date) == today
-    ).scalar() or 0
-
-    # Файлы за сегодня
-    daily_files = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "file",
-        models.UserDocument.status == "completed",
-        func.date(models.UserDocument.upload_date) == today
-    ).count()
-
-    # Фото за сегодня
-    daily_photos = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "photo",
-        models.UserDocument.status == "completed",
-        func.date(models.UserDocument.upload_date) == today
-    ).count()
-
-    # Тексты за сегодня
-    daily_texts = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "text",
-        models.UserDocument.status == "completed",
-        func.date(models.UserDocument.upload_date) == today
-    ).count()
-
-    logger.debug(f"Статистика для {telegram_id}: подписка={tier.tier_name}, сообщений={messages_today}/{tier.daily_messages}")
+    logger.debug(
+        f"Статистика для {telegram_id}: подписка={tier.tier_name}, сообщений={messages_today}/{tier.daily_messages}")
 
     # Формируем ответ
     return schemas.UserStats(
@@ -263,29 +250,12 @@ def upload_text_to_kb(data: schemas.TextUploadRequest, db: Session = Depends(get
         models.SubscriptionTier.id == subscription.tier_id
     ).first()
 
-    # Проверяем лимиты хранилища
-    total_texts = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "text",
-        models.UserDocument.is_deleted == False
-    ).scalar()
-
-    if tier.texts_limit != 9999 and total_texts >= tier.texts_limit:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит хранилища текстов: {total_texts}/{tier.texts_limit}")
-        raise HTTPException(status_code=400, detail="Storage limit exceeded")
-
-    # Проверяем дневной лимит
-    today = func.date(func.now())
-    daily_texts = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "text",
-        func.date(models.UserDocument.upload_date) == today,
-        models.UserDocument.is_deleted == False
-    ).scalar()
-
-    if tier.daily_texts != 9999 and daily_texts >= tier.daily_texts:
-        logger.warning(f"Пользователь {data.telegram_id} превысил дневной лимит текстов: {daily_texts}/{tier.daily_texts}")
-        raise HTTPException(status_code=400, detail="Daily limit exceeded")
+    # Проверяем лимиты через LimitsService
+    limits_service = LimitsService(db)
+    can_upload, error = limits_service.check_text_limits(user.id, tier)
+    if not can_upload:
+        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
+        raise HTTPException(status_code=400, detail=error)
 
     # Создаём запись
     new_doc = models.UserDocument(
@@ -485,29 +455,12 @@ def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(
         models.SubscriptionTier.id == subscription.tier_id
     ).first()
 
-    # Проверяем лимиты хранилища
-    total_photos = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "photo",
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).scalar()
-
-    if tier.photos_limit != 9999 and total_photos >= tier.photos_limit:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит хранилища фото: {total_photos}/{tier.photos_limit}")
-        raise HTTPException(status_code=400, detail="Storage limit exceeded")
-
-    # Проверяем дневной лимит
-    today = func.date(func.now())
-    daily_photos = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "photo",
-        func.date(models.UserDocument.upload_date) == today
-    ).scalar()
-
-    if tier.daily_photos != 9999 and daily_photos >= tier.daily_photos:
-        logger.warning(f"Пользователь {data.telegram_id} превысил дневной лимит фото: {daily_photos}/{tier.daily_photos}")
-        raise HTTPException(status_code=400, detail="Daily limit exceeded")
+    # Проверяем лимиты через LimitsService
+    limits_service = LimitsService(db)
+    can_upload, error = limits_service.check_photo_limits(user.id, tier)
+    if not can_upload:
+        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
+        raise HTTPException(status_code=400, detail=error)
 
     # Определяем приоритет
     tier_name = tier.tier_name
@@ -538,7 +491,7 @@ def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(
         s3_key = upload_photo_to_s3(photo['base64'], user.id, new_doc.id)
 
         # Сохраняем S3 URL в БД
-        s3_url = f"https://storage.yandexcloud.net/{os.getenv('YC_BUCKET_NAME')}/{s3_key}"
+        s3_url = f"{S3_BASE_URL}/{s3_key}"
         new_doc.file_url = s3_url
         db.commit()
 
@@ -559,8 +512,17 @@ def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(
 
 # Получение presigned URL для фото
 @app.get("/kb/photo/{document_id}/presigned")
-def get_photo_presigned_url_endpoint(document_id: int, db: Session = Depends(get_db)):
-    logger.debug(f"Запрос presigned URL для фото: document_id={document_id}")
+def get_photo_presigned_url_endpoint(document_id: int, telegram_id: int, db: Session = Depends(get_db)):
+    logger.debug(f"Запрос presigned URL для фото: document_id={document_id}, telegram_id={telegram_id}")
+
+    # Находим пользователя
+    user = db.query(models.User).filter(
+        models.User.telegram_id == telegram_id
+    ).first()
+
+    if not user:
+        logger.warning(f"Пользователь не найден: telegram_id={telegram_id}")
+        raise HTTPException(status_code=404, detail="User not found")
 
     # Находим документ
     doc = db.query(models.UserDocument).filter(
@@ -572,20 +534,10 @@ def get_photo_presigned_url_endpoint(document_id: int, db: Session = Depends(get
         logger.warning(f"Фото не найдено: document_id={document_id}")
         raise HTTPException(status_code=404, detail="Photo not found")
 
-    # Извлекаем s3_key из file_url
-    bucket_name = os.getenv('YC_BUCKET_NAME')
-    s3_key = doc.file_url.split(f"{bucket_name}/")[1]
-
-    # Генерируем presigned URL
-    from s3_storage import get_photo_presigned_url
-    presigned_url = get_photo_presigned_url(s3_key)
-
-    logger.debug(f"Сгенерирован presigned URL для документа {document_id}")
-
-    return {
-        "presigned_url": presigned_url,
-        "expires_in": 3600
-    }
+    # ПРОВЕРКА ПРАВ ДОСТУПА
+    if doc.user_id != user.id:
+        logger.warning(f"Попытка доступа к чужому фото: user={user.id}, doc.user_id={doc.user_id}")
+        raise HTTPException(status_code=403, detail="Access denied")
 
 
 # Загрузка файлов в базу знаний
@@ -613,29 +565,12 @@ def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(ge
         models.SubscriptionTier.id == subscription.tier_id
     ).first()
 
-    # Проверяем лимиты хранилища
-    total_files = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "file",
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).scalar()
-
-    if tier.files_limit != 9999 and total_files >= tier.files_limit:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит хранилища файлов: {total_files}/{tier.files_limit}")
-        raise HTTPException(status_code=400, detail="Storage limit exceeded")
-
-    # Проверяем дневной лимит
-    today = func.date(func.now())
-    daily_files = db.query(func.count(models.UserDocument.id)).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.file_type == "file",
-        func.date(models.UserDocument.upload_date) == today
-    ).scalar()
-
-    if tier.daily_files != 9999 and daily_files >= tier.daily_files:
-        logger.warning(f"Пользователь {data.telegram_id} превысил дневной лимит файлов: {daily_files}/{tier.daily_files}")
-        raise HTTPException(status_code=400, detail="Daily limit exceeded")
+    # Проверяем лимиты через LimitsService
+    limits_service = LimitsService(db)
+    can_upload, error = limits_service.check_file_limits(user.id, tier)
+    if not can_upload:
+        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
+        raise HTTPException(status_code=400, detail=error)
 
     # Определяем приоритет
     tier_name = tier.tier_name
@@ -669,7 +604,7 @@ def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(ge
         s3_key = upload_file_to_s3(file_data['file_bytes'], user.id, new_doc.id, extension)
 
         # Сохраняем S3 URL в БД
-        s3_url = f"https://storage.yandexcloud.net/{os.getenv('YC_BUCKET_NAME')}/{s3_key}"
+        s3_url = f"{S3_BASE_URL}/{s3_key}"
         new_doc.file_url = s3_url
         db.commit()
 
@@ -705,9 +640,8 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
 
     # Если это фото или файл — удаляем из S3
     if document.file_type in ["photo", "file"] and document.file_url:
-        bucket_name = os.getenv('YC_BUCKET_NAME')
         try:
-            s3_key = document.file_url.split(f"{bucket_name}/")[1]
+            s3_key = document.file_url.replace(f"{S3_BASE_URL}/", "")
 
             # Удаляем из S3 через универсальную функцию
             from s3_storage import delete_from_s3

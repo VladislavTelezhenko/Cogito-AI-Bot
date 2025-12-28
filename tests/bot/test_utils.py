@@ -1,8 +1,8 @@
 # Тесты утилит бота
 
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
-from bot.bot_utils import check_upload_limits, ButtonFactory
+from unittest.mock import patch
+from utils.bot_utils import check_upload_limits, ButtonFactory
 from shared.config import CONTENT_CONFIG
 
 pytestmark = pytest.mark.bot

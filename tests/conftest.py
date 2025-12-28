@@ -58,6 +58,21 @@ def seed_tiers(db):
             "daily_texts": 5
         },
         {
+            "tier_name": "basic",
+            "display_name": "📦 Базовая",
+            "model_name": "GPT-4o-mini",
+            "price_rubles": 499,
+            "daily_messages": 100,
+            "video_hours_limit": 2,
+            "files_limit": 10,
+            "photos_limit": 20,
+            "texts_limit": 50,
+            "daily_video_hours": 1,
+            "daily_files": 5,
+            "daily_photos": 10,
+            "daily_texts": 25
+        },
+        {
             "tier_name": "premium",
             "display_name": "💎 Премиум",
             "model_name": "GPT-4o",
@@ -74,17 +89,17 @@ def seed_tiers(db):
         },
         {
             "tier_name": "ultra",
-            "display_name": "👑 Ультра",
-            "model_name": "o1",
-            "price_rubles": 2999,
-            "daily_messages": 9999,
-            "video_hours_limit": 9999,
+            "display_name": "🚀 Ультра",
+            "model_name": "Последняя модель Chat GPT!",
+            "price_rubles": 2499,
+            "daily_messages": 1500,
+            "video_hours_limit": 100,
             "files_limit": 9999,
             "photos_limit": 9999,
             "texts_limit": 9999,
-            "daily_video_hours": 9999,
-            "daily_files": 9999,
-            "daily_photos": 9999,
+            "daily_video_hours": 20,
+            "daily_files": 50,
+            "daily_photos": 100,
             "daily_texts": 9999
         },
         {

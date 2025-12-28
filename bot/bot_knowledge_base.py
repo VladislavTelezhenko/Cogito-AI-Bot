@@ -1,7 +1,7 @@
 # Handlers для работы с базой знаний
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
+from telegram.ext import ConversationHandler
 import yt_dlp
 import re
 import asyncio
@@ -12,14 +12,13 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import ffmpeg
 
-from shared.config import settings, CONTENT_CONFIG, Limits, Messages
-from bot_utils import (
+from shared.config import CONTENT_CONFIG, Limits, Messages
+from utils.bot_utils import (
     api_request,
     get_user_stats,
     check_upload_limits,
     FileValidator,
     ButtonFactory,
-    safe_message_edit,
     photo_uploader,
     file_uploader,
     paginate_documents,
@@ -416,7 +415,13 @@ async def handle_video_upload(update: Update, context):
 
     # Проверяем хранилище
     if "∞" not in storage_videos:
-        storage_current, storage_limit = map(float, storage_videos.split("/"))
+        parts = storage_videos.split("/")
+        if len(parts) != 2:
+            await update.message.reply_text(Messages.ERROR_DATA)
+            return ConversationHandler.END
+
+        storage_current = float(parts[0])
+        storage_limit = float(parts[1])
         available_storage = storage_limit - storage_current
 
         if total_duration > available_storage:
@@ -438,7 +443,13 @@ async def handle_video_upload(update: Update, context):
 
     # Проверяем дневной лимит
     if "∞" not in daily_videos:
-        daily_current, daily_limit = map(float, daily_videos.split("/"))
+        parts = daily_videos.split("/")
+        if len(parts) != 2:
+            await update.message.reply_text(Messages.ERROR_DATA)
+            return ConversationHandler.END
+
+        daily_current = float(parts[0])
+        daily_limit = float(parts[1])
         available_daily = daily_limit - daily_current
 
         if total_duration > available_daily:
@@ -519,7 +530,13 @@ def convert_to_jpeg_for_ocr(photo_bytes: bytes) -> str:
         image.save(output, format='JPEG', quality=100, optimize=True)
         jpeg_bytes = output.getvalue()
 
-        return base64.b64encode(jpeg_bytes).decode('utf-8')
+        # Кодируем в base64
+        try:
+            jpeg_base64 = base64.b64encode(jpeg_bytes).decode('utf-8')
+            return jpeg_base64
+        except Exception as e:
+            logger.error(f"Ошибка кодирования в base64: {e}")
+            raise ValueError(f"Failed to encode to base64: {e}")
 
     except Exception as e:
         logger.error(f"Ошибка конвертации в JPEG: {e}")
@@ -1003,7 +1020,7 @@ async def show_photo_original(update: Update, context):
     document_id = int(query.data.split("_")[-1])
 
     # Получаем presigned URL
-    success, photo_data, error = await api_request("GET", f"/kb/photo/{document_id}/presigned")
+    success, photo_data, error = await api_request("GET",f"/kb/photo/{document_id}/presigned?telegram_id={query.from_user.id}")
 
     if not success:
         await query.answer(Messages.ERROR_DATA, show_alert=True)

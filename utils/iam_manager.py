@@ -7,6 +7,8 @@ import time
 import os
 import logging
 from dotenv import load_dotenv, set_key
+from pathlib import Path
+
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,7 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+env_path = Path(__file__).parent.parent / 'secret' / '.env'
+load_dotenv(dotenv_path=env_path)
 
 
 def get_new_iam_token():

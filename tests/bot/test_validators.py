@@ -1,7 +1,7 @@
 # Тесты валидаторов файлов
 
 import pytest
-from bot.bot_utils import FileValidator
+from utils.bot_utils import FileValidator
 
 pytestmark = pytest.mark.bot
 

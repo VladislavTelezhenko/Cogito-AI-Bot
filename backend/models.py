@@ -2,7 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, DateTime, Float, Text, Boolean, ForeignKey
 from datetime import datetime
-from database import Base
+from backend.database import Base
 
 
 # users - общая информация о пользователях

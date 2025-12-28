@@ -13,13 +13,13 @@ import httpx
 import asyncio
 from utils.iam_manager import get_new_iam_token, get_new_vision_iam_token
 import io
-import subprocess
 from pdf2image import convert_from_bytes
 from docx import Document
 from shared.config import settings, DocumentStatus, NOTIFICATION_TEMPLATES
 from typing import Optional, Tuple
 import logging
 import base64
+from shared.notifications import NotificationService
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -90,14 +90,12 @@ def update_document_status(
         logger.error(f"Не удалось обновить статус документа {document_id}: {e}")
 
 
-# Отправка уведомления пользователю (использует bot_utils.NotificationService)
 async def notify_user_success(
         telegram_id: int,
         content_type: str,
         **kwargs
 ) -> None:
-    # Импортируем здесь, чтобы избежать циклических импортов
-    from bot_utils import NotificationService
+    from shared.notifications import NotificationService
 
     await NotificationService.send_success(telegram_id, content_type, **kwargs)
 
@@ -110,7 +108,11 @@ async def notify_user_success(
 def upload_photo_to_s3(photo_base64: str, user_id: int, document_id: int) -> str:
     try:
         # Декодируем base64
-        photo_bytes = base64.b64decode(photo_base64)
+        try:
+            photo_bytes = base64.b64decode(photo_base64)
+        except Exception as e:
+            logger.error(f"Ошибка декодирования base64 для фото document_id={document_id}: {e}")
+            raise ValueError(f"Invalid base64 data: {e}")
 
         # Формируем путь в S3
         s3_key = f"photos/user_{user_id}/photo_{document_id}.jpg"
@@ -126,6 +128,9 @@ def upload_photo_to_s3(photo_base64: str, user_id: int, document_id: int) -> str
         logger.info(f"Загружено фото в S3: {s3_key}")
         return s3_key
 
+    except ValueError:
+        # Пробрасываем ValueError дальше (это ошибка валидации base64)
+        raise
     except Exception as e:
         logger.error(f"Ошибка загрузки фото в S3: {e}")
         raise
@@ -155,7 +160,11 @@ def get_photo_presigned_url(s3_key: str, expiration: int = 3600) -> str:
 def upload_file_to_s3(file_base64: str, user_id: int, document_id: int, extension: str) -> str:
     try:
         # Декодируем base64
-        file_bytes = base64.b64decode(file_base64)
+        try:
+            file_bytes = base64.b64decode(file_base64)
+        except Exception as e:
+            logger.error(f"Ошибка декодирования base64 для файла document_id={document_id}: {e}")
+            raise ValueError(f"Invalid base64 data: {e}")
 
         # Формируем путь в S3
         s3_key = f"files/user_{user_id}/document_{document_id}.{extension}"
@@ -170,6 +179,9 @@ def upload_file_to_s3(file_base64: str, user_id: int, document_id: int, extensio
         logger.info(f"Загружен файл в S3: {s3_key}")
         return s3_key
 
+    except ValueError:
+        # Пробрасываем ValueError дальше
+        raise
     except Exception as e:
         logger.error(f"Ошибка загрузки файла в S3: {e}")
         raise

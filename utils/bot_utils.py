@@ -124,11 +124,16 @@ async def check_upload_limits(
     daily_value = kb_daily.get(daily_key, "0/0")
 
     # Проверяем хранилище (пропускаем если есть ∞)
+    # Проверяем хранилище (пропускаем если есть ∞)
     if "∞" not in storage_value:
         try:
-            storage_current, storage_limit = storage_value.split("/")
-            storage_current = float(storage_current)
-            storage_limit = float(storage_limit)
+            parts = storage_value.split("/")
+            if len(parts) != 2:
+                logger.error(f"Некорректный формат storage_value: {storage_value}")
+                return False, Messages.ERROR_DATA, []
+
+            storage_current = float(parts[0])
+            storage_limit = float(parts[1])
 
             if storage_current >= storage_limit:
                 error_text = Messages.LIMIT_STORAGE_EXCEEDED.format(
@@ -156,11 +161,16 @@ async def check_upload_limits(
             logger.error(f"Ошибка парсинга лимита хранилища {storage_value}: {e}")
 
     # Проверяем дневной лимит (пропускаем если есть ∞)
+    # Проверяем дневной лимит (пропускаем если есть ∞)
     if "∞" not in daily_value:
         try:
-            daily_current, daily_limit = daily_value.split("/")
-            daily_current = float(daily_current)
-            daily_limit = float(daily_limit)
+            parts = daily_value.split("/")
+            if len(parts) != 2:
+                logger.error(f"Некорректный формат daily_value: {daily_value}")
+                return False, Messages.ERROR_DATA, []
+
+            daily_current = float(parts[0])
+            daily_limit = float(parts[1])
 
             if daily_current >= daily_limit:
                 error_text = Messages.LIMIT_DAILY_EXCEEDED.format(
@@ -410,7 +420,7 @@ class BufferedUploader:
 
         logger.info(f"Включен режим загрузки {self.content_type} для пользователя {user_id}")
 
-    def stop_upload_mode(self, context) -> None:
+    async def stop_upload_mode(self, context) -> None:
         # Выключение режима ожидания загрузки
 
         # Выключаем флаг
@@ -422,7 +432,13 @@ class BufferedUploader:
         # Отменяем таймер если есть
         timer_key = self.get_timer_key()
         if timer_key in context.user_data and context.user_data[timer_key]:
-            context.user_data[timer_key].cancel()
+            task = context.user_data[timer_key]
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             context.user_data[timer_key] = None
 
         logger.info(f"Выключен режим загрузки {self.content_type}")
@@ -512,58 +528,60 @@ class BufferedUploader:
 
         logger.info(f"Начинается отправка {total} {self.config['title_genitive']} в API")
 
-        # Обновляем статусное сообщение
         try:
-            await context.bot.edit_message_text(
-                chat_id=user.id,
-                message_id=context.user_data[status_msg_key],
-                text=f"⏳ Отправляю {total} {self.config['title_genitive']} на обработку..."
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось обновить статусное сообщение: {e}")
-
-        # Формируем запрос к API
-        payload = {
-            "telegram_id": user.id,
-            self.content_type + "s": items  # "photos" или "files"
-        }
-
-        # Определяем таймаут в зависимости от типа
-        timeout = Limits.FILE_UPLOAD_TIMEOUT_SEC if self.content_type == "file" else Limits.API_REQUEST_TIMEOUT_SEC
-
-        # Отправляем в API
-        success, data, error = await api_request(
-            "POST",
-            self.config["api_endpoint"],
-            timeout=timeout,
-            json=payload
-        )
-
-        if success:
-            logger.info(f"Успешно отправлено {total} {self.config['title_genitive']} для пользователя {user.id}")
-
-            # Формируем клавиатуру
-            keyboard = ButtonFactory.success_keyboard(self.content_type)
-
-            # Обновляем сообщение
+            # Обновляем статусное сообщение
             try:
                 await context.bot.edit_message_text(
                     chat_id=user.id,
                     message_id=context.user_data[status_msg_key],
-                    text=f"✅ {total} {self.config['title_genitive']} отправлено на обработку!\n\nУведомление придёт после распознавания",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    text=f"⏳ Отправляю {total} {self.config['title_genitive']} на обработку..."
                 )
             except Exception as e:
-                logger.error(f"Ошибка обновления финального сообщения: {e}")
-        else:
-            logger.error(f"Ошибка отправки {self.content_type} в API: {error}")
-            await context.bot.send_message(
-                user.id,
-                Messages.ERROR_UPLOAD
+                logger.warning(f"Не удалось обновить статусное сообщение: {e}")
+
+            # Формируем запрос к API
+            payload = {
+                "telegram_id": user.id,
+                self.content_type + "s": items  # "photos" или "files"
+            }
+
+            # Определяем таймаут в зависимости от типа
+            timeout = Limits.FILE_UPLOAD_TIMEOUT_SEC if self.content_type == "file" else Limits.API_REQUEST_TIMEOUT_SEC
+
+            # Отправляем в API
+            success, data, error = await api_request(
+                "POST",
+                self.config["api_endpoint"],
+                timeout=timeout,
+                json=payload
             )
 
-        # Выключаем режим ожидания
-        self.stop_upload_mode(context)
+            if success:
+                logger.info(f"Успешно отправлено {total} {self.config['title_genitive']} для пользователя {user.id}")
+
+                # Формируем клавиатуру
+                keyboard = ButtonFactory.success_keyboard(self.content_type)
+
+                # Обновляем сообщение
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=user.id,
+                        message_id=context.user_data[status_msg_key],
+                        text=f"✅ {total} {self.config['title_genitive']} отправлено на обработку!\n\nУведомление придёт после распознавания",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка обновления финального сообщения: {e}")
+            else:
+                logger.error(f"Ошибка отправки {self.content_type} в API: {error}")
+                await context.bot.send_message(
+                    user.id,
+                    Messages.ERROR_UPLOAD
+                )
+
+        finally:
+            # ВСЕГДА выключаем режим ожидания, даже при ошибке
+            await self.stop_upload_mode(context)
 
 
 # ============================================================================

@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
-from bot.bot_utils import api_request, get_user_stats, safe_message_edit, paginate_documents
+from utils.bot_utils import api_request, get_user_stats, safe_message_edit, paginate_documents
 from shared.config import Limits
 
 pytestmark = pytest.mark.bot

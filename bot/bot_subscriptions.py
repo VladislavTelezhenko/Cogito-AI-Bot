@@ -1,7 +1,7 @@
 # Handlers для работы с подписками
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from bot_utils import api_request, ButtonFactory, logger
+from utils.bot_utils import api_request, ButtonFactory, logger
 
 
 # ============================================================================

@@ -2,8 +2,10 @@
 
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+env_path = Path(__file__).parent.parent / 'secret' / '.env'
+load_dotenv(dotenv_path=env_path)
 
 
 # Настройки приложения из переменных окружения
@@ -179,3 +181,8 @@ NOTIFICATION_TEMPLATES = {
     "photo_truncated": "✅ Фото обработано!\n\n📝 Распознанный текст:\n\n{text}...\n\n(Текст обрезан. Полный текст в базе знаний)",
     "file": "✅ Файл обработан!\n\n📄 {filename}\n\n📝 Распознано символов: {count}",
 }
+
+
+# S3 Storage конфигурация
+YC_BUCKET_NAME = os.getenv('YC_BUCKET_NAME')
+S3_BASE_URL = f"https://storage.yandexcloud.net/{YC_BUCKET_NAME}"

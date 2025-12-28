@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 from shared.config import settings, CONTENT_CONFIG
-from bot_utils import api_request, get_user_stats, logger
+from utils.bot_utils import api_request, get_user_stats, logger
 
 # Импорт handlers из модулей
 from bot_knowledge_base import (
@@ -39,7 +39,8 @@ from bot_knowledge_base import (
     delete_document,
     exit_upload,
     WAITING_TEXT,
-    WAITING_VIDEO
+    WAITING_VIDEO,
+    executor
 )
 
 from bot_subscriptions import (
@@ -214,6 +215,17 @@ async def post_init(application):
     await application.bot.set_my_commands(commands)
 
 
+# Обработчик завершения работы
+async def shutdown(application):
+    logger.info("🛑 Закрытие ресурсов...")
+
+    # Закрываем ThreadPoolExecutor
+    logger.info("Закрытие ThreadPoolExecutor...")
+    executor.shutdown(wait=True)
+
+    logger.info("✓ Ресурсы освобождены")
+
+
 # ============================================================================
 # ИНИЦИАЛИЗАЦИЯ БОТА
 # ============================================================================
@@ -224,6 +236,9 @@ def main():
 
     # Устанавливаем меню команд
     app.post_init = post_init
+
+    # Регистрируем shutdown
+    app.post_shutdown = shutdown
 
     # Команда /start
     app.add_handler(CommandHandler("start", start))
@@ -321,16 +336,6 @@ def main():
 # GRACEFUL SHUTDOWN
 # ============================================================================
 
-# Обработчик сигнала завершения
-async def shutdown(application):
-    logger.info("🛑 Получен сигнал завершения, сохраняю буферы...")
-
-    # Здесь можно добавить логику сохранения буферов
-    # Например, отправить незавершенные загрузки
-
-    logger.info("✅ Graceful shutdown завершён")
-
-
 def signal_handler(sig, frame):
     logger.info("🛑 Получен сигнал завершения (Ctrl+C)")
     sys.exit(0)
@@ -339,5 +344,6 @@ def signal_handler(sig, frame):
 # Регистрируем обработчик сигналов
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
 if __name__ == "__main__":
     main()

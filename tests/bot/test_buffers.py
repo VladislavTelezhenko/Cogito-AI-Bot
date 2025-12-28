@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
-from bot.bot_utils import BufferedUploader
+from utils.bot_utils import BufferedUploader
 
 pytestmark = pytest.mark.bot
 
