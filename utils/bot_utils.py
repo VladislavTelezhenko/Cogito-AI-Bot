@@ -1,203 +1,184 @@
-# Утилиты для Telegram бота
+"""
+Утилиты для Telegram бота.
 
-import logging
-import httpx
-from typing import Optional, Tuple, List, Dict, Any
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from shared.config import settings, Messages, Limits, CONTENT_CONFIG, NOTIFICATION_TEMPLATES
+Включает: API запросы, проверку лимитов, валидацию файлов,
+буферизацию загрузки, пагинацию и фабрики кнопок.
+"""
+
+import aiohttp
 import asyncio
-import os
+from typing import Optional, Tuple, Dict, Any, List
+from datetime import datetime
+import logging
 
-# ============================================================================
-# НАСТРОЙКА ЛОГИРОВАНИЯ
-# ============================================================================
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+from shared.config import settings, Limits, Messages, CONTENT_CONFIG
 
+# Настройка логирования
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# API WRAPPER
+# API REQUESTS
 # ============================================================================
 
-# Универсальная обёртка для запросов к API
-# Возвращает (success, data, error)
 async def api_request(
         method: str,
         endpoint: str,
-        timeout: int = Limits.API_REQUEST_TIMEOUT_SEC,
-        **kwargs
-) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None
+) -> Tuple[bool, Optional[Dict], Optional[str]]:
+    """
+    Выполнить HTTP запрос к API.
+
+    Args:
+        method: HTTP метод (GET, POST, PUT, DELETE)
+        endpoint: Путь эндпоинта (например, /users/register)
+        json: JSON данные для POST/PUT
+        params: Query параметры для GET
+
+    Returns:
+        Кортеж (success, data, error_message)
+    """
     url = f"{settings.API_URL}{endpoint}"
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response: httpx.Response
-            if method.upper() == "GET":
-                response = await client.get(url, **kwargs)
-            elif method.upper() == "POST":
-                response = await client.post(url, **kwargs)
-            elif method.upper() == "PUT":
-                response = await client.put(url, **kwargs)
-            elif method.upper() == "DELETE":
-                response = await client.delete(url, **kwargs)
-            else:
-                logger.error(f"Неподдерживаемый HTTP метод: {method}")
-                return False, None, f"Неподдерживаемый метод: {method}"
+        async with aiohttp.ClientSession() as session:
+            async with session.request(
+                    method,
+                    url,
+                    json=json,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
 
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"API запрос успешен: {method} {endpoint}")
-                return True, data, None
-            else:
-                error_msg = f"API вернул код {response.status_code}: {response.text}"
-                logger.warning(error_msg)
-                return False, None, error_msg
+                if response.status == 200:
+                    data = await response.json()
+                    return True, data, None
+                else:
+                    error_data = await response.json()
+                    error_message = error_data.get("detail", f"HTTP {response.status}")
+                    logger.error(f"API Error: {method} {endpoint} -> {response.status}: {error_message}")
+                    return False, None, error_message
 
-    except httpx.TimeoutException:
-        error_msg = "Превышено время ожидания ответа от сервера"
+    except asyncio.TimeoutError:
         logger.error(f"Timeout: {method} {endpoint}")
-        return False, None, error_msg
-
+        return False, None, "Request timeout"
     except Exception as e:
-        error_msg = f"Ошибка запроса: {str(e)}"
-        logger.error(f"Ошибка API: {method} {endpoint} - {e}")
-        return False, None, error_msg
+        logger.error(f"Exception in API request: {method} {endpoint} -> {e}")
+        return False, None, str(e)
 
 
-# ============================================================================
-# ПОЛУЧЕНИЕ СТАТИСТИКИ ПОЛЬЗОВАТЕЛЯ
-# ============================================================================
-
-# Получение статистики пользователя из API
-# Возвращает (success, stats, error)
 async def get_user_stats(telegram_id: int) -> Tuple[bool, Optional[Dict], Optional[str]]:
-    success, data, error = await api_request("GET", f"/users/{telegram_id}/stats")
+    """
+    Получить статистику пользователя.
 
-    if not success:
-        logger.error(f"Не удалось получить статистику пользователя {telegram_id}: {error}")
+    Args:
+        telegram_id: ID пользователя в Telegram
 
-    return success, data, error
+    Returns:
+        Кортеж (success, stats_dict, error)
+    """
+    return await api_request("GET", f"/users/{telegram_id}/stats")
 
 
 # ============================================================================
-# ПРОВЕРКА ЛИМИТОВ ЗАГРУЗКИ
+# ПРОВЕРКА ЛИМИТОВ
 # ============================================================================
 
-# Проверка лимитов загрузки контента
-# Возвращает (can_upload, error_message, keyboard)
 async def check_upload_limits(
         telegram_id: int,
         content_type: str
 ) -> Tuple[bool, str, List[List[InlineKeyboardButton]]]:
-    # Получаем конфигурацию типа контента
-    config = CONTENT_CONFIG.get(content_type)
-    if not config:
-        logger.error(f"Неизвестный тип контента: {content_type}")
-        return False, Messages.ERROR_DATA, []
+    """
+    Проверить лимиты загрузки для типа контента.
 
-    # Получаем статистику пользователя
+    Args:
+        telegram_id: ID пользователя
+        content_type: Тип контента (text/photo/video/file)
+
+    Returns:
+        Кортеж (can_upload, error_message, keyboard)
+    """
+    # Получаем статистику
     success, stats, error = await get_user_stats(telegram_id)
 
     if not success:
-        logger.error(f"Ошибка получения статистики для проверки лимитов: {error}")
-        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")]]
+        keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
         return False, Messages.ERROR_CONNECTION, keyboard
 
-    # Извлекаем данные о лимитах
-    kb_storage = stats.get("kb_storage", {})
-    kb_daily = stats.get("kb_daily", {})
-    subscription_tier = stats.get("subscription_tier", "free")
+    kb_storage = stats["kb_storage"]
+    kb_daily = stats["kb_daily"]
+    subscription_tier = stats["subscription_tier"]
 
-    storage_key = config["storage_key"]
-    daily_key = config["daily_key"]
+    # Получаем конфигурацию типа контента
+    config = CONTENT_CONFIG.get(content_type)
+    if not config:
+        keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
+        return False, "⚠️ Неизвестный тип контента!", keyboard
 
-    storage_value = kb_storage.get(storage_key, "0/0")
-    daily_value = kb_daily.get(daily_key, "0/0")
+    storage_value = kb_storage.get(config["storage_key"], "0/0")
+    daily_value = kb_daily.get(config["daily_key"], "0/0")
 
-    # Проверяем хранилище (пропускаем если есть ∞)
-    # Проверяем хранилище (пропускаем если есть ∞)
+    # Проверка хранилища
     if "∞" not in storage_value:
+        parts = storage_value.split("/")
+        if len(parts) != 2:
+            keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
+            return False, Messages.ERROR_DATA, keyboard
+
         try:
-            parts = storage_value.split("/")
-            if len(parts) != 2:
-                logger.error(f"Некорректный формат storage_value: {storage_value}")
-                return False, Messages.ERROR_DATA, []
+            storage_current = int(parts[0]) if parts[0].isdigit() else float(parts[0])
+            storage_limit = int(parts[1]) if parts[1].isdigit() else float(parts[1])
+        except ValueError:
+            keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
+            return False, Messages.ERROR_DATA, keyboard
 
-            storage_current = float(parts[0])
-            storage_limit = float(parts[1])
+        if storage_current >= storage_limit:
+            keyboard = []
+            text = f"⚠️ Хранилище {config['title_genitive']} заполнено!\n\n"
+            text += f"Использовано: {storage_current}/{storage_limit} {config['unit']}\n\n"
 
-            if storage_current >= storage_limit:
-                error_text = Messages.LIMIT_STORAGE_EXCEEDED.format(
-                    content_type=config["title_genitive"],
-                    current=storage_current,
-                    limit=storage_limit,
-                    unit=config["unit"]
-                )
-                error_text += "\n\n"
+            if subscription_tier not in ["ultra", "admin"]:
+                text += Messages.UPGRADE_PROMPT
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += Messages.MAX_TIER_INFO
 
-                keyboard = []
+            keyboard.append([ButtonFactory.back_button("upload_file_menu")])
+            return False, text, keyboard
 
-                if subscription_tier not in ["ultra", "admin"]:
-                    error_text += Messages.UPGRADE_PROMPT
-                    keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
-                else:
-                    error_text += Messages.MAX_TIER_INFO.format(content_type=config["title_plural_lower"])
-
-                keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
-
-                logger.info(f"Пользователь {telegram_id} превысил лимит хранилища {content_type}")
-                return False, error_text, keyboard
-
-        except ValueError as e:
-            logger.error(f"Ошибка парсинга лимита хранилища {storage_value}: {e}")
-
-    # Проверяем дневной лимит (пропускаем если есть ∞)
-    # Проверяем дневной лимит (пропускаем если есть ∞)
+    # Проверка дневного лимита
     if "∞" not in daily_value:
+        parts = daily_value.split("/")
+        if len(parts) != 2:
+            keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
+            return False, Messages.ERROR_DATA, keyboard
+
         try:
-            parts = daily_value.split("/")
-            if len(parts) != 2:
-                logger.error(f"Некорректный формат daily_value: {daily_value}")
-                return False, Messages.ERROR_DATA, []
+            daily_current = int(parts[0]) if parts[0].isdigit() else float(parts[0])
+            daily_limit = int(parts[1]) if parts[1].isdigit() else float(parts[1])
+        except ValueError:
+            keyboard = [[ButtonFactory.back_button("upload_file_menu")]]
+            return False, Messages.ERROR_DATA, keyboard
 
-            daily_current = float(parts[0])
-            daily_limit = float(parts[1])
+        if daily_current >= daily_limit:
+            keyboard = []
+            text = f"⚠️ Дневной лимит {config['title_genitive']} исчерпан!\n\n"
+            text += f"Использовано сегодня: {daily_current}/{daily_limit} {config['unit']}\n\n"
 
-            if daily_current >= daily_limit:
-                error_text = Messages.LIMIT_DAILY_EXCEEDED.format(
-                    content_type=config["title_genitive"],
-                    current=daily_current,
-                    limit=daily_limit,
-                    unit=config["unit"]
-                )
-                error_text += "\n\n"
+            if subscription_tier not in ["ultra", "admin"]:
+                text += Messages.UPGRADE_PROMPT
+                keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
+            else:
+                text += Messages.DAILY_RESET_INFO
 
-                keyboard = []
+            keyboard.append([ButtonFactory.back_button("upload_file_menu")])
+            return False, text, keyboard
 
-                if subscription_tier not in ["ultra", "admin"]:
-                    error_text += Messages.UPGRADE_PROMPT
-                    keyboard.append([InlineKeyboardButton("⭐ Смотреть подписки", callback_data="subscriptions")])
-                else:
-                    error_text += Messages.DAILY_RESET_INFO
-
-                keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="exit_upload")])
-
-                logger.info(f"Пользователь {telegram_id} превысил дневной лимит {content_type}")
-                return False, error_text, keyboard
-
-        except ValueError as e:
-            logger.error(f"Ошибка парсинга дневного лимита {daily_value}: {e}")
-
-    logger.info(f"Проверка лимитов {content_type} для пользователя {telegram_id}: OK")
+    # Лимиты OK
     return True, "", []
 
 
@@ -205,640 +186,362 @@ async def check_upload_limits(
 # ВАЛИДАЦИЯ ФАЙЛОВ
 # ============================================================================
 
-# Валидатор файлов
 class FileValidator:
-    # Разрешённые расширения для каждого типа
+    """Валидатор файлов для загрузки."""
+
     ALLOWED_EXTENSIONS = {
-        "file": ['.txt', '.pdf', '.docx'],
-        "photo": ['.jpg', '.jpeg', '.png'],
+        "photo": [".jpg", ".jpeg", ".png"],
+        "file": [".txt", ".pdf", ".docx"]
     }
 
-    # MIME типы
     MIME_TYPES = {
-        'txt': 'text/plain',
-        'pdf': 'application/pdf',
-        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'jpg': 'image/jpeg',
-        'jpeg': 'image/jpeg',
-        'png': 'image/png',
+        ".txt": "text/plain",
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     }
 
-    @classmethod
-    def validate_file(
-            cls,
-            filename: str,
-            file_size: int,
-            content_type: str
-    ) -> Tuple[bool, Optional[str], Optional[str]]:
-        # Валидация файла
-        # Возвращает (is_valid, error_message, mime_type)
+    @staticmethod
+    def validate_file(filename: str, file_size: int, content_type: str) -> Tuple[bool, str, Optional[str]]:
+        """
+        Валидация файла.
 
+        Args:
+            filename: Имя файла
+            file_size: Размер в байтах
+            content_type: Тип контента (photo/file)
+
+        Returns:
+            Кортеж (is_valid, error_message, mime_type)
+        """
         # Проверка расширения
-        file_extension = os.path.splitext(filename)[1].lower()
+        ext = None
+        for allowed_ext in FileValidator.ALLOWED_EXTENSIONS.get(content_type, []):
+            if filename.lower().endswith(allowed_ext):
+                ext = allowed_ext
+                break
 
-        allowed = cls.ALLOWED_EXTENSIONS.get(content_type, [])
-
-        if file_extension not in allowed:
-            error = f"⚠️ Неподдерживаемый формат файла: {file_extension}\n\n"
-            error += f"✅ Поддерживаемые форматы: {', '.join(allowed).upper()}"
-            logger.warning(f"Отклонён файл с расширением {file_extension}")
-            return False, error, None
+        if not ext:
+            allowed = ", ".join(FileValidator.ALLOWED_EXTENSIONS.get(content_type, []))
+            return False, f"⚠️ Неподдерживаемый формат!\n\nРазрешены: {allowed}", None
 
         # Проверка размера
-        if file_size > Limits.MAX_FILE_SIZE_BYTES:
-            size_mb = file_size / (1024 * 1024)
-            error = f"⚠️ Файл слишком большой!\n\n"
-            error += f"Размер: {size_mb:.2f} MB\n"
-            error += f"Максимум: {Limits.MAX_FILE_SIZE_MB} MB"
-            logger.warning(f"Отклонён файл размером {size_mb:.2f} MB")
-            return False, error, None
+        max_size_bytes = Limits.MAX_FILE_SIZE_MB * 1024 * 1024
+        if file_size > max_size_bytes:
+            return False, f"⚠️ Файл слишком большой!\n\nМаксимум: {Limits.MAX_FILE_SIZE_MB} MB", None
 
-        # Определяем MIME type
-        extension = file_extension[1:]
-        mime_type = cls.MIME_TYPES.get(extension)
+        # Определение MIME типа
+        mime_type = FileValidator.MIME_TYPES.get(ext, "application/octet-stream")
 
-        if not mime_type:
-            error = f"⚠️ Не удалось определить тип файла: {filename}"
-            logger.error(f"Неизвестный MIME type для расширения {extension}")
-            return False, error, None
-
-        logger.info(f"Файл {filename} прошёл валидацию")
-        return True, None, mime_type
+        return True, "", mime_type
 
 
 # ============================================================================
-# ФАБРИКА КНОПОК
+# BUFFERED UPLOADER (С ИСПРАВЛЕНИЕМ RACE CONDITION)
 # ============================================================================
 
-# Фабрика для создания стандартных кнопок
-class ButtonFactory:
-
-    @staticmethod
-    def back_to_main() -> InlineKeyboardButton:
-        # Кнопка возврата в главное меню
-        return InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")
-
-    @staticmethod
-    def back_button(callback_data: str) -> InlineKeyboardButton:
-        # Кнопка "Назад"
-        return InlineKeyboardButton("◀️ Назад", callback_data=callback_data)
-
-    @staticmethod
-    def upload_more(content_type: str) -> InlineKeyboardButton:
-        # Кнопка "Загрузить ещё"
-        config = CONTENT_CONFIG[content_type]
-        return InlineKeyboardButton(
-            f"📤 Загрузить ещё {config['title_plural_lower']}",
-            callback_data=config['callbacks']['upload']
-        )
-
-    @staticmethod
-    def view_list(content_type: str) -> InlineKeyboardButton:
-        # Кнопка "Мои [тип контента]"
-        config = CONTENT_CONFIG[content_type]
-        return InlineKeyboardButton(
-            f"{config['icon']} Мои {config['title_plural_lower']}",
-            callback_data=config['callbacks']['my_list']
-        )
-
-    @staticmethod
-    def success_keyboard(content_type: str) -> List[List[InlineKeyboardButton]]:
-        # Клавиатура после успешной загрузки
-        return [
-            [ButtonFactory.upload_more(content_type), ButtonFactory.view_list(content_type)],
-            [ButtonFactory.back_to_main()]
-        ]
-
-
-# ============================================================================
-# УМНОЕ РЕДАКТИРОВАНИЕ СООБЩЕНИЙ
-# ============================================================================
-
-# Умное редактирование сообщения (обрабатывает случай с фото)
-async def safe_message_edit(
-        query,
-        context,
-        text: str,
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-        parse_mode: Optional[str] = None
-) -> None:
-    user_id = query.from_user.id
-
-    try:
-        # Если сообщение с фото — удаляем и отправляем новое
-        if query.message.photo:
-            await query.message.delete()
-            await context.bot.send_message(
-                user_id,
-                text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-            logger.info(f"Удалено сообщение с фото, отправлено новое для пользователя {user_id}")
-        else:
-            # Обычное текстовое сообщение — редактируем
-            await query.edit_message_text(
-                text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-            logger.debug(f"Отредактировано сообщение для пользователя {user_id}")
-
-    except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения: {e}")
-        # Fallback: отправляем новое сообщение
-        try:
-            await context.bot.send_message(
-                user_id,
-                text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode
-            )
-        except Exception as e2:
-            logger.error(f"Ошибка отправки fallback сообщения: {e2}")
-
-
-# ============================================================================
-# ОБЩИЕ FALLBACKS ДЛЯ CONVERSATIONHANDLER
-# ============================================================================
-
-# Общие fallbacks для всех ConversationHandler
-COMMON_FALLBACKS = [
-    "exit_upload",
-    "upload_file",
-    "knowledge_base",
-    "back_to_main"
-]
-
-
-# ============================================================================
-# БУФЕРИЗАЦИЯ ЗАГРУЗОК
-# ============================================================================
-
-# Класс для буферизации загрузок (фото и файлы)
-# Собирает элементы в буфер и отправляет пакетом после таймаута или достижения лимита
 class BufferedUploader:
+    """
+    Менеджер буферизации для загрузки файлов и фото.
 
-    def __init__(self, content_type: str):
-        # Инициализация буфера
-        self.content_type = content_type
-        self.config = CONTENT_CONFIG[content_type]
-        self.max_items = Limits.BUFFER_MAX_ITEMS
-        self.timeout = Limits.BUFFER_TIMEOUT_SEC
+    Собирает файлы в буфер, затем отправляет их пакетом.
+    Исправлен race condition через asyncio.Lock.
+    """
 
-        logger.info(f"Инициализирован BufferedUploader для {content_type}")
+    def __init__(self, upload_type: str, api_endpoint: str, max_items: int, wait_time: int):
+        """
+        Инициализация BufferedUploader.
 
-    def get_buffer_key(self) -> str:
-        # Ключ для хранения буфера в context.user_data
-        return f"{self.content_type}_buffer"
+        Args:
+            upload_type: Тип загрузки (photo/file)
+            api_endpoint: Эндпоинт API для отправки
+            max_items: Максимальное количество элементов в буфере
+            wait_time: Время ожидания (секунды) перед отправкой
+        """
+        self.upload_type = upload_type
+        self.api_endpoint = api_endpoint
+        self.max_items = max_items
+        self.wait_time = wait_time
+        self.lock = asyncio.Lock()  # FIX #19: Защита от race condition
 
-    def get_waiting_key(self) -> str:
-        # Ключ для флага ожидания в context.user_data
-        return f"waiting_for_{self.content_type}s"
+    async def start_upload_mode(self, update: Update, context):
+        """
+        Запустить режим ожидания файлов.
 
-    def get_status_msg_key(self) -> str:
-        # Ключ для ID статусного сообщения
-        return f"{self.content_type}_status_msg_id"
+        Args:
+            update: Telegram Update
+            context: Callback context
+        """
+        async with self.lock:
+            context.user_data[f'waiting_for_{self.upload_type}s'] = True
+            context.user_data[f'{self.upload_type}_buffer'] = []
+            context.user_data[f'{self.upload_type}_timer'] = None
 
-    def get_timer_key(self) -> str:
-        # Ключ для таймера в context.user_data
-        return f"{self.content_type}_timer"
+    async def is_waiting(self, context):
+        """
+        Проверить активен ли режим ожидания.
 
-    async def start_upload_mode(
-            self,
-            update: Update,
-            context
-    ) -> None:
-        # Включение режима ожидания загрузки
+        Args:
+            context: Callback context
+
+        Returns:
+            True если режим активен
+        """
+        return context.user_data.get(f'waiting_for_{self.upload_type}s', False)
+
+    async def add_to_buffer(self, update: Update, context, item: dict):
+        """
+        Добавить элемент в буфер.
+
+        Args:
+            update: Telegram Update
+            context: Callback context
+            item: Элемент для добавления
+        """
+        async with self.lock:
+            buffer = context.user_data.get(f'{self.upload_type}_buffer', [])
+            buffer.append(item)
+            context.user_data[f'{self.upload_type}_buffer'] = buffer
+
+            # Отменяем старый таймер
+            timer = context.user_data.get(f'{self.upload_type}_timer')
+            if timer:
+                timer.cancel()
+
+            # Если буфер заполнен - отправляем сразу
+            if len(buffer) >= self.max_items:
+                await self._send_buffer(update, context)
+            else:
+                # Иначе запускаем новый таймер
+                timer = asyncio.create_task(self._wait_and_send(update, context))
+                context.user_data[f'{self.upload_type}_timer'] = timer
+
+    async def _wait_and_send(self, update: Update, context):
+        """
+        Подождать и отправить буфер.
+
+        Args:
+            update: Telegram Update
+            context: Callback context
+        """
+        try:
+            await asyncio.sleep(self.wait_time)
+            async with self.lock:
+                await self._send_buffer(update, context)
+        except asyncio.CancelledError:
+            logger.debug(f"Таймер {self.upload_type} отменён")
+
+    async def _send_buffer(self, update: Update, context):
+        """
+        Отправить буфер в API.
+
+        Args:
+            update: Telegram Update
+            context: Callback context
+        """
+        buffer = context.user_data.get(f'{self.upload_type}_buffer', [])
+
+        if not buffer:
+            return
+
         user_id = update.effective_user.id
 
-        # Включаем флаг ожидания
-        context.user_data[self.get_waiting_key()] = True
+        await context.bot.send_message(
+            user_id,
+            f"⏳ Отправляю {len(buffer)} {self.upload_type}(s) на обработку..."
+        )
 
-        # Инициализируем буфер
-        context.user_data[self.get_buffer_key()] = []
-
-        logger.info(f"Включен режим загрузки {self.content_type} для пользователя {user_id}")
-
-    async def stop_upload_mode(self, context) -> None:
-        # Выключение режима ожидания загрузки
-
-        # Выключаем флаг
-        context.user_data[self.get_waiting_key()] = False
-
-        # Очищаем буфер
-        context.user_data[self.get_buffer_key()] = []
-
-        # Отменяем таймер если есть
-        timer_key = self.get_timer_key()
-        if timer_key in context.user_data and context.user_data[timer_key]:
-            task = context.user_data[timer_key]
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            context.user_data[timer_key] = None
-
-        logger.info(f"Выключен режим загрузки {self.content_type}")
-
-    def is_waiting(self, context) -> bool:
-        # Проверка, ждём ли мы этот тип контента
-        return context.user_data.get(self.get_waiting_key(), False)
-
-    async def add_to_buffer(
-            self,
-            update: Update,
-            context,
-            item_data: dict
-    ) -> None:
-        # Добавление элемента в буфер
-
-        user = update.effective_user
-        buffer_key = self.get_buffer_key()
-
-        # Добавляем в буфер
-        if buffer_key not in context.user_data:
-            context.user_data[buffer_key] = []
-
-        context.user_data[buffer_key].append(item_data)
-
-        count = len(context.user_data[buffer_key])
-
-        logger.info(f"Добавлен {self.content_type} в буфер пользователя {user.id}. Всего в буфере: {count}")
-
-        # Обновляем статусное сообщение
-        status_msg_key = self.get_status_msg_key()
-
-        if count == 1:
-            # Первый элемент — создаём статусное сообщение
-            status_msg = await update.message.reply_text(
-                f"⏳ Получено {self.config['title_genitive']}: {count}"
-            )
-            context.user_data[status_msg_key] = status_msg.message_id
-        else:
-            # Обновляем существующее
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=user.id,
-                    message_id=context.user_data[status_msg_key],
-                    text=f"⏳ Получено {self.config['title_genitive']}: {count}"
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось обновить статусное сообщение: {e}")
-
-        # Проверяем достигнут ли лимит
-        if count >= self.max_items:
-            logger.info(f"Достигнут лимит буфера ({self.max_items}), отправляем немедленно")
-            await self._finish_upload(update, context)
-            return
-
-        # Отменяем старый таймер
-        timer_key = self.get_timer_key()
-        if timer_key in context.user_data and context.user_data[timer_key]:
-            context.user_data[timer_key].cancel()
-
-        # Создаём новый таймер
-        async def timer_callback():
-            await asyncio.sleep(self.timeout)
-            await self._finish_upload(update, context)
-
-        context.user_data[timer_key] = asyncio.create_task(timer_callback())
-
-        logger.debug(f"Установлен таймер на {self.timeout} секунд")
-
-    async def _finish_upload(
-            self,
-            update: Update,
-            context
-    ) -> None:
-        # Завершение загрузки и отправка буфера в API
-
-        user = update.effective_user if update.message else update.effective_user
-        buffer_key = self.get_buffer_key()
-        status_msg_key = self.get_status_msg_key()
-
-        items = context.user_data.get(buffer_key, [])
-        total = len(items)
-
-        if total == 0:
-            logger.warning(f"Попытка завершить загрузку с пустым буфером")
-            return
-
-        logger.info(f"Начинается отправка {total} {self.config['title_genitive']} в API")
-
-        try:
-            # Обновляем статусное сообщение
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=user.id,
-                    message_id=context.user_data[status_msg_key],
-                    text=f"⏳ Отправляю {total} {self.config['title_genitive']} на обработку..."
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось обновить статусное сообщение: {e}")
-
-            # Формируем запрос к API
+        # Формируем payload
+        if self.upload_type == "photo":
             payload = {
-                "telegram_id": user.id,
-                self.content_type + "s": items  # "photos" или "files"
+                "telegram_id": user_id,
+                "photos": buffer
             }
-
-            # Определяем таймаут в зависимости от типа
-            timeout = Limits.FILE_UPLOAD_TIMEOUT_SEC if self.content_type == "file" else Limits.API_REQUEST_TIMEOUT_SEC
-
-            # Отправляем в API
-            success, data, error = await api_request(
-                "POST",
-                self.config["api_endpoint"],
-                timeout=timeout,
-                json=payload
-            )
-
-            if success:
-                logger.info(f"Успешно отправлено {total} {self.config['title_genitive']} для пользователя {user.id}")
-
-                # Формируем клавиатуру
-                keyboard = ButtonFactory.success_keyboard(self.content_type)
-
-                # Обновляем сообщение
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=user.id,
-                        message_id=context.user_data[status_msg_key],
-                        text=f"✅ {total} {self.config['title_genitive']} отправлено на обработку!\n\nУведомление придёт после распознавания",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка обновления финального сообщения: {e}")
-            else:
-                logger.error(f"Ошибка отправки {self.content_type} в API: {error}")
-                await context.bot.send_message(
-                    user.id,
-                    Messages.ERROR_UPLOAD
-                )
-
-        finally:
-            # ВСЕГДА выключаем режим ожидания, даже при ошибке
-            await self.stop_upload_mode(context)
-
-
-# ============================================================================
-# ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ UPLOADERS
-# ============================================================================
-
-# Создаём глобальные экземпляры для использования в handlers
-photo_uploader = BufferedUploader("photo")
-file_uploader = BufferedUploader("file")
-
-
-# ============================================================================
-# СЕРВИС УВЕДОМЛЕНИЙ
-# ============================================================================
-
-# Сервис для отправки уведомлений пользователям
-class NotificationService:
-
-    @staticmethod
-    async def send_message(
-            telegram_id: int,
-            text: str,
-            keyboard: Optional[List[List[dict]]] = None
-    ) -> None:
-        # Отправка сообщения пользователю
-        # keyboard: список списков с dict вида {"text": "...", "callback_data": "..."}
-
-        bot_token = settings.TELEGRAM_TOKEN
-
-        try:
+        else:  # file
             payload = {
-                "chat_id": telegram_id,
-                "text": text,
-                "parse_mode": "HTML"
+                "telegram_id": user_id,
+                "files": buffer
             }
 
-            # Добавляем клавиатуру если есть
-            if keyboard:
-                payload["reply_markup"] = {
-                    "inline_keyboard": keyboard
-                }
+        # Отправляем в API
+        success, data, error = await api_request("POST", self.api_endpoint, json=payload)
 
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                    json=payload
-                )
+        if success:
+            logger.info(f"{len(buffer)} {self.upload_type}(s) отправлено на обработку для пользователя {user_id}")
 
-            logger.info(f"Отправлено уведомление пользователю {telegram_id}")
+            success_text = f"✅ {len(buffer)} {self.upload_type}(s) добавлено в базу знаний!"
 
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление пользователю {telegram_id}: {e}")
-
-    @staticmethod
-    async def send_photo(
-            telegram_id: int,
-            photo_bytes: bytes,
-            caption: str,
-            keyboard: Optional[List[List[dict]]] = None
-    ) -> None:
-        # Отправка фото с подписью пользователю
-
-        bot_token = settings.TELEGRAM_TOKEN
-
-        try:
-            # Формируем multipart request
-            files = {
-                'photo': ('photo.jpg', photo_bytes, 'image/jpeg')
-            }
-
-            data = {
-                'chat_id': str(telegram_id),
-                'caption': caption,
-                'parse_mode': 'HTML'
-            }
-
-            if keyboard:
-                import json
-                data['reply_markup'] = json.dumps({"inline_keyboard": keyboard})
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                await client.post(
-                    f"https://api.telegram.org/bot{bot_token}/sendPhoto",
-                    files=files,
-                    data=data
-                )
-
-            logger.info(f"Отправлено фото пользователю {telegram_id}")
-
-        except Exception as e:
-            logger.error(f"Ошибка отправки фото пользователю {telegram_id}: {e}")
-
-    @staticmethod
-    async def send_success(
-            telegram_id: int,
-            content_type: str,
-            **kwargs
-    ) -> None:
-        # Отправка уведомления об успешной обработке
-        # kwargs: параметры для шаблона (filename, text, count и т.д.)
-
-        config = CONTENT_CONFIG[content_type]
-
-        # Формируем текст из шаблона
-        template_key = content_type
-
-        # Для фото проверяем длину текста
-        if content_type == "photo":
-            text = kwargs.get("text", "")
-            if len(text) > 900:
-                template_key = "photo_truncated"
-                kwargs["text"] = text[:900]
-
-        template = NOTIFICATION_TEMPLATES.get(template_key, "✅ Обработка завершена!")
-        message_text = template.format(**kwargs)
-
-        # Формируем клавиатуру
-        keyboard = [
-            [
-                {"text": f"📤 Загрузить ещё {config['title_plural_lower']}",
-                 "callback_data": config['callbacks']['upload']},
-                {"text": f"{config['icon']} Мои {config['title_plural_lower']}",
-                 "callback_data": config['callbacks']['my_list']}
-            ],
-            [
-                {"text": "🏠 Главное меню", "callback_data": "back_to_main"}
-            ]
-        ]
-
-        # Для фото отправляем с изображением
-        if content_type == "photo" and "photo_bytes" in kwargs:
-            await NotificationService.send_photo(
-                telegram_id,
-                kwargs["photo_bytes"],
-                message_text,
-                keyboard
+            keyboard = ButtonFactory.success_keyboard(self.upload_type)
+            await context.bot.send_message(
+                user_id,
+                success_text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            await NotificationService.send_message(
-                telegram_id,
-                message_text,
-                keyboard
-            )
+            logger.error(f"Ошибка загрузки {self.upload_type}s: {error}")
+            await context.bot.send_message(user_id, Messages.ERROR_UPLOAD)
+
+        # Очищаем состояние
+        await self.stop_upload_mode(context)
+
+    async def stop_upload_mode(self, context):
+        """
+        Остановить режим ожидания и очистить буфер.
+
+        Args:
+            context: Callback context
+        """
+        async with self.lock:
+            # Отменяем таймер если есть
+            timer = context.user_data.get(f'{self.upload_type}_timer')
+            if timer and not timer.done():
+                timer.cancel()
+
+            # Очищаем состояние
+            context.user_data[f'waiting_for_{self.upload_type}s'] = False
+            context.user_data[f'{self.upload_type}_buffer'] = []
+            context.user_data[f'{self.upload_type}_timer'] = None
+
+            logger.debug(f"Режим загрузки {self.upload_type} остановлен")
+
+
+# Создаём глобальные инстансы
+photo_uploader = BufferedUploader(
+    upload_type="photo",
+    api_endpoint="/kb/upload/photos",
+    max_items=Limits.BUFFER_MAX_ITEMS,
+    wait_time=Limits.BUFFER_WAIT_TIME_SEC
+)
+
+file_uploader = BufferedUploader(
+    upload_type="file",
+    api_endpoint="/kb/upload/files",
+    max_items=Limits.BUFFER_MAX_ITEMS,
+    wait_time=Limits.BUFFER_WAIT_TIME_SEC
+)
 
 
 # ============================================================================
 # ПАГИНАЦИЯ ДОКУМЕНТОВ
 # ============================================================================
 
-# Универсальная пагинация списка документов
 async def paginate_documents(
-        documents: List[dict],
+        documents: List[Dict],
         content_type: str,
-        context,
+        context: ContextTypes.DEFAULT_TYPE,
         query,
-        user_id: int
-) -> None:
-    # Пагинация документов с автоматическим форматированием
+        user_id: int,
+        page: int = 0,
+        items_per_page: int = 5
+):
+    """
+    Пагинация списка документов.
 
-    config = CONTENT_CONFIG[content_type]
+    Args:
+        documents: Список документов
+        content_type: Тип контента
+        context: Callback context
+        query: Callback query
+        user_id: ID пользователя
+        page: Номер страницы
+        items_per_page: Элементов на странице
+    """
+    total = len(documents)
+    total_pages = (total + items_per_page - 1) // items_per_page
 
-    # Разбиваем на страницы
-    items_per_page = Limits.PAGINATION_ITEMS
-    total_pages = (len(documents) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = start_idx + items_per_page
+    page_documents = documents[start_idx:end_idx]
 
-    # Формируем страницы
-    for page in range(total_pages):
-        start_idx = page * items_per_page
-        end_idx = min(start_idx + items_per_page, len(documents))
-        page_docs = documents[start_idx:end_idx]
+    config = CONTENT_CONFIG.get(content_type, {})
 
-        is_first_page = (page == 0)
-        is_last_page = (page == total_pages - 1)
+    text = f"{config.get('icon', '📝')} {config.get('title_plural', 'Файлы')} ({total})\n\n"
 
-        # Формируем текст страницы
-        if total_pages > 1:
-            files_text = f"{config['icon']} Мои {config['title_plural_lower']} ({len(documents)}) — страница {page + 1}/{total_pages}\n\n"
+    keyboard = []
+
+    for doc in page_documents:
+        filename = doc['filename']
+        upload_date = doc['upload_date'][:10]
+
+        button_text = f"📄 {filename[:25]}... ({upload_date})"
+
+        if content_type == "photo":
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"view_doc_{doc['id']}")])
+            keyboard.append([InlineKeyboardButton("🖼 Показать оригинал", callback_data=f"show_photo_{doc['id']}")])
         else:
-            files_text = f"{config['icon']} Мои {config['title_plural_lower']} ({len(documents)}):\n\n"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"view_doc_{doc['id']}")])
 
-        keyboard = []
+    # Навигация
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"page_{content_type}_{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Вперёд ▶️", callback_data=f"page_{content_type}_{page + 1}"))
 
-        for doc in page_docs:
-            # Превью текста (первые 100 символов)
-            preview = doc.get("extracted_text", "[Текст не распознан]")[:Limits.TEXT_PREVIEW_LENGTH]
-            if len(doc.get("extracted_text", "")) > Limits.TEXT_PREVIEW_LENGTH:
-                preview += "..."
+    if nav_row:
+        keyboard.append(nav_row)
 
-            datetime_str = doc['upload_date'][:16].replace('T', ' ')
+    # Кнопки действий
+    keyboard.append([ButtonFactory.upload_more(content_type)])
+    keyboard.append([ButtonFactory.back_button("my_files")])
 
-            # Формируем строку документа в зависимости от типа
-            if config.get("has_link"):
-                # Видео со ссылкой
-                files_text += f"{config['icon']} Видео {doc['id']}: <a href='{doc['file_url']}'>{doc['filename']}</a>\n"
-            else:
-                # Остальные типы
-                if content_type == "file":
-                    files_text += f"{config['icon']} {doc['filename']}\n"
-                else:
-                    files_text += f"{config['icon']} {config['title']} {doc['id']}\n"
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-            files_text += f"<blockquote>{preview}</blockquote>\n"
-            files_text += f"📅 {datetime_str}\n\n"
+    if query.message.photo:
+        await query.message.delete()
+        await context.bot.send_message(user_id, text, reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(text, reply_markup=reply_markup)
 
-            # Кнопка "Полный текст"
-            doc_buttons = [
-                InlineKeyboardButton(f"👁 Полный текст {doc['id']}", callback_data=f"view_doc_{doc['id']}")
-            ]
 
-            # Кнопка "Показать фото" если это фото
-            if config.get("has_preview_button"):
-                doc_buttons.append(
-                    InlineKeyboardButton(f"🖼 Показать фото {doc['id']}", callback_data=f"show_photo_{doc['id']}")
-                )
+# ============================================================================
+# ФАБРИКИ КНОПОК
+# ============================================================================
 
-            keyboard.append(doc_buttons)
+class ButtonFactory:
+    """Фабрика для создания стандартных кнопок."""
 
-            # Кнопка удаления на отдельной строке
-            keyboard.append([
-                InlineKeyboardButton(f"🗑 Удалить {doc['id']}", callback_data=f"delete_doc_{doc['id']}")
-            ])
+    @staticmethod
+    def back_button(callback: str) -> InlineKeyboardButton:
+        """
+        Кнопка "Назад".
 
-        # Кнопки навигации только на последней странице
-        if is_last_page:
-            keyboard.append([InlineKeyboardButton(f"📤 Загрузить {config['title_plural_lower']}",
-                                                  callback_data=config['callbacks']['upload'])])
-            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="my_files")])
+        Args:
+            callback: Callback data
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        Returns:
+            InlineKeyboardButton
+        """
+        return InlineKeyboardButton("◀️ Назад", callback_data=callback)
 
-        # Первую страницу редактируем, остальные отправляем новыми
-        if is_first_page:
-            # Проверяем тип сообщения
-            if query.message.photo:
-                await query.message.delete()
-                await context.bot.send_message(
-                    user_id,
-                    files_text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-            else:
-                await query.edit_message_text(
-                    files_text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-        else:
-            await context.bot.send_message(
-                user_id,
-                files_text,
-                reply_markup=reply_markup,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
+    @staticmethod
+    def upload_more(content_type: str) -> InlineKeyboardButton:
+        """
+        Кнопка "Загрузить ещё".
 
-    logger.info(
-        f"Отображено {len(documents)} {config['title_genitive']} на {total_pages} страницах для пользователя {user_id}")
+        Args:
+            content_type: Тип контента
+
+        Returns:
+            InlineKeyboardButton
+        """
+        config = CONTENT_CONFIG.get(content_type, {})
+        return InlineKeyboardButton(
+            f"➕ Загрузить ещё {config.get('title_accusative', 'файлы')}",
+            callback_data=config.get('callbacks', {}).get('upload', 'upload_file')
+        )
+
+    @staticmethod
+    def success_keyboard(content_type: str) -> List[List[InlineKeyboardButton]]:
+        """
+        Клавиатура после успешной загрузки.
+
+        Args:
+            content_type: Тип контента
+
+        Returns:
+            Список списков кнопок
+        """
+        return [
+            [ButtonFactory.upload_more(content_type)],
+            [ButtonFactory.back_button("upload_file_menu")]
+        ]

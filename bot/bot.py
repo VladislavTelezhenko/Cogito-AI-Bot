@@ -1,4 +1,8 @@
-# Главный файл Telegram бота
+"""
+Главный файл Telegram бота.
+
+Регистрирует все handlers, настраивает команды и запускает бота.
+"""
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
@@ -9,26 +13,42 @@ from telegram.ext import (
     filters,
     ConversationHandler
 )
+import signal
+import sys
+import logging
 
 from shared.config import settings, CONTENT_CONFIG
 from utils.bot_utils import api_request, get_user_stats, logger
 
 # Импорт handlers из модулей
-from bot_knowledge_base import (
+from bot.handlers import (
+    # Common
     knowledge_base_menu,
     upload_file_menu,
+    exit_upload,
+
+    # Text
     upload_text,
     handle_text_upload,
     handle_wrong_media_in_text,
+    WAITING_TEXT,
+
+    # Video
     upload_video,
     handle_video_upload,
     handle_wrong_media_in_video,
+    WAITING_VIDEO,
+
+    # Photo
     upload_photo,
     global_photo_handler,
+
+    # File
     upload_file_doc,
     reject_text_when_waiting_files,
-    reject_photo_when_waiting_files,
     global_document_handler,
+
+    # Documents
     my_files,
     my_texts,
     my_videos,
@@ -37,26 +57,32 @@ from bot_knowledge_base import (
     view_document,
     show_photo_original,
     delete_document,
-    exit_upload,
-    WAITING_TEXT,
-    WAITING_VIDEO,
-    executor
 )
 
-from bot_subscriptions import (
+from bot.bot_subscriptions import (
     subscriptions_menu,
     handle_subscription_selection
 )
-import signal
-import sys
+
+# Executor для блокирующих операций (импортируем из video_handlers)
+from bot.handlers.video_handlers import executor
 
 
 # ============================================================================
 # РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
 # ============================================================================
 
-# Регистрация пользователя через API
 async def register_user_in_api(telegram_id: int, username: str = None):
+    """
+    Регистрация пользователя через API.
+
+    Args:
+        telegram_id: ID пользователя в Telegram
+        username: Имя пользователя
+
+    Returns:
+        Данные пользователя или None при ошибке
+    """
     success, data, error = await api_request(
         "POST",
         "/users/register",
@@ -77,8 +103,14 @@ async def register_user_in_api(telegram_id: int, username: str = None):
 # КОМАНДА /START
 # ============================================================================
 
-# Команда /start
 async def start(update: Update, context):
+    """
+    Команда /start - регистрация и главное меню.
+
+    Args:
+        update: Telegram Update
+        context: Callback context
+    """
     user = update.effective_user
 
     # Регистрируем пользователя
@@ -102,8 +134,17 @@ async def start(update: Update, context):
 # ГЛАВНОЕ МЕНЮ
 # ============================================================================
 
-# Формирование главного меню
 async def build_main_menu(user_id: int, first_name: str):
+    """
+    Формирование главного меню с статистикой.
+
+    Args:
+        user_id: ID пользователя
+        first_name: Имя пользователя
+
+    Returns:
+        Кортеж (текст, клавиатура) или (None, None) при ошибке
+    """
     # Получаем статистику
     success, stats, error = await get_user_stats(user_id)
 
@@ -175,8 +216,14 @@ async def build_main_menu(user_id: int, first_name: str):
     return welcome_text, reply_markup
 
 
-# Возврат в главное меню
 async def back_to_main(update: Update, context):
+    """
+    Возврат в главное меню.
+
+    Args:
+        update: Telegram Update
+        context: Callback context
+    """
     query = update.callback_query
     await query.answer()
 
@@ -207,16 +254,30 @@ async def back_to_main(update: Update, context):
 # УСТАНОВКА КОМАНД БОТА
 # ============================================================================
 
-# Установка команд бота
 async def post_init(application):
+    """
+    Установка меню команд бота.
+
+    Args:
+        application: Telegram Application
+    """
     commands = [
         BotCommand("start", "🏠 Главное меню"),
     ]
     await application.bot.set_my_commands(commands)
 
+    logger.info("Команды бота установлены")
 
-# Обработчик завершения работы
+
 async def shutdown(application):
+    """
+    Обработчик завершения работы бота.
+
+    Закрывает все ресурсы и потоки.
+
+    Args:
+        application: Telegram Application
+    """
     logger.info("🛑 Закрытие ресурсов...")
 
     # Закрываем ThreadPoolExecutor
@@ -231,7 +292,9 @@ async def shutdown(application):
 # ============================================================================
 
 def main():
-    # Запуск бота
+    """Запуск бота с регистрацией всех handlers."""
+
+    # Создание приложения
     app = ApplicationBuilder().token(settings.TELEGRAM_TOKEN).build()
 
     # Устанавливаем меню команд
@@ -337,6 +400,13 @@ def main():
 # ============================================================================
 
 def signal_handler(sig, frame):
+    """
+    Обработчик сигналов остановки.
+
+    Args:
+        sig: Сигнал
+        frame: Фрейм
+    """
     logger.info("🛑 Получен сигнал завершения (Ctrl+C)")
     sys.exit(0)
 

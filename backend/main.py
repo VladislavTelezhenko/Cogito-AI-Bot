@@ -1,29 +1,54 @@
-# API бота
+"""
+FastAPI приложение - основной API сервер бота.
+
+Предоставляет REST API для:
+- Регистрации и управления пользователями
+- Управления подписками
+- Загрузки и управления документами в базе знаний
+- Обработки видео, фото и файлов
+"""
 
 import os
 from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from datetime import datetime, date
+from datetime import datetime
 import uvicorn
+import logging
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from backend.database import get_db, engine
 from backend import models, schemas
 from backend.celery_app import celery_app
 from celery.result import AsyncResult
-from backend.s3_storage import process_video
+from backend.s3_storage import (
+    process_video,
+    upload_photo_to_s3,
+    process_photo_ocr,
+    upload_file_to_s3,
+    process_file,
+    delete_from_s3,
+    get_photo_presigned_url
+)
 from dotenv import load_dotenv
 from pathlib import Path
-from backend.limits_service import LimitsService
-import logging
-from shared.config import S3_BASE_URL, YC_BUCKET_NAME
+from shared.config import S3_BASE_URL
 
+# Импорт сервисов
+from backend.services import (
+    UserService,
+    SubscriptionService,
+    DocumentService,
+    LimitsService
+)
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('api.log', encoding='utf-8'),
+        logging.FileHandler('logs/api.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -36,332 +61,33 @@ load_dotenv(dotenv_path=env_path)
 models.Base.metadata.create_all(bind=engine)
 logger.info("Инициализированы таблицы в БД")
 
-app = FastAPI(title="Cogito AI Bot API", version="1.0.0")
+# Инициализация FastAPI
+app = FastAPI(
+    title="Cogito AI Bot API",
+    version="2.0.0",
+    description="API для управления базой знаний и подписками"
+)
+
+# Rate Limiting (защита от DoS)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# ============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
 
-
-# ЭНДПОИНТЫ ПОЛЬЗОВАТЕЛЕЙ
-
-# Регистрация нового пользователя или авторизация старого
-@app.post("/users/register", response_model=schemas.UserResponse)
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    logger.info(f"Запрос регистрации пользователя: telegram_id={user.telegram_id}")
-
-    # Проверяем, существует ли пользователь
-    existing_user = db.query(models.User).filter(
-        models.User.telegram_id == user.telegram_id
-    ).first()
-
-    if existing_user:
-        logger.info(f"Пользователь {user.telegram_id} уже зарегистрирован")
-        return existing_user
-
-    # Если пользователь новый
-    # 1. Создаём запись пользователя
-    new_user = models.User(
-        telegram_id=user.telegram_id,
-        username=user.username,
-        referral_code=f"REF{user.telegram_id}",
-        referred_by=user.referred_by
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    logger.info(f"Создан новый пользователь: id={new_user.id}, telegram_id={user.telegram_id}")
-
-    # 2. Даём бесплатную подписку
-    free_tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.tier_name == "free"
-    ).first()
-
-    new_subscription = models.UserSubscription(
-        user_id=new_user.id,
-        tier_id=free_tier.id,
-        transaction_id=None,
-        source="registration",
-        status="active",
-        start_date=datetime.now(),
-        end_date_plan=None,
-        end_date_fact=None
-    )
-
-    db.add(new_subscription)
-    db.commit()
-
-    logger.info(f"Пользователю {new_user.id} назначена бесплатная подписка")
-
-    return new_user
-
-
-# Получаем статистику пользователя для главного меню
-@app.get("/users/{telegram_id}/stats", response_model=schemas.UserStats)
-def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
-    logger.debug(f"Запрос статистики пользователя: telegram_id={telegram_id}")
-
-    # Получаем пользователя
-    user = db.query(models.User).filter(
-        models.User.telegram_id == telegram_id
-    ).first()
-
-    if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={telegram_id}")
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Получаем активную подписку с тарифом (joinedload для одного запроса)
-    from sqlalchemy.orm import joinedload
-
-    active_subscription = db.query(models.UserSubscription).options(
-        joinedload(models.UserSubscription.tier)
-    ).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    if not active_subscription:
-        logger.error(f"У пользователя {telegram_id} нет активной подписки")
-        raise HTTPException(status_code=404, detail="No active subscription")
-
-    tier = active_subscription.tier
-
-    # Считаем сообщения сегодня
-    today = func.date(func.now())
-    messages_today = db.query(models.UserDailyAction).filter(
-        models.UserDailyAction.user_id == user.id,
-        models.UserDailyAction.action_type == "ai_query",
-        func.date(models.UserDailyAction.action_date) == today
-    ).count()
-
-    # ОПТИМИЗАЦИЯ: Один запрос для всей статистики по документам
-    from sqlalchemy import case, and_
-
-    stats = db.query(
-        # Общее хранилище
-        func.coalesce(
-            func.sum(case((models.UserDocument.file_type == "video", models.UserDocument.duration_hours), else_=0)),
-            0
-        ).label("video_hours"),
-        func.count(case((models.UserDocument.file_type == "file", models.UserDocument.id))).label("files_count"),
-        func.count(case((models.UserDocument.file_type == "photo", models.UserDocument.id))).label("photos_count"),
-        func.count(case((models.UserDocument.file_type == "text", models.UserDocument.id))).label("texts_count"),
-
-        # Дневное использование
-        func.coalesce(
-            func.sum(case(
-                (and_(models.UserDocument.file_type == "video", func.date(models.UserDocument.upload_date) == today),
-                 models.UserDocument.duration_hours),
-                else_=0
-            )),
-            0
-        ).label("daily_video_hours"),
-        func.count(case(
-            (and_(models.UserDocument.file_type == "file", func.date(models.UserDocument.upload_date) == today),
-             models.UserDocument.id)
-        )).label("daily_files"),
-        func.count(case(
-            (and_(models.UserDocument.file_type == "photo", func.date(models.UserDocument.upload_date) == today),
-             models.UserDocument.id)
-        )).label("daily_photos"),
-        func.count(case(
-            (and_(models.UserDocument.file_type == "text", func.date(models.UserDocument.upload_date) == today),
-             models.UserDocument.id)
-        )).label("daily_texts"),
-    ).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.status == "completed",
-        models.UserDocument.is_deleted == False
-    ).first()
-
-    # Извлекаем значения из результата
-    video_hours = stats.video_hours or 0
-    files_count = stats.files_count or 0
-    photos_count = stats.photos_count or 0
-    texts_count = stats.texts_count or 0
-    daily_video_hours = stats.daily_video_hours or 0
-    daily_files = stats.daily_files or 0
-    daily_photos = stats.daily_photos or 0
-    daily_texts = stats.daily_texts or 0
-
-    logger.debug(
-        f"Статистика для {telegram_id}: подписка={tier.tier_name}, сообщений={messages_today}/{tier.daily_messages}")
-
-    # Формируем ответ
-    return schemas.UserStats(
-        subscription_name=tier.display_name,
-        subscription_tier=tier.tier_name,
-        subscription_end=active_subscription.end_date_plan,
-        messages_today=messages_today,
-        messages_limit=tier.daily_messages,
-        kb_storage={
-            "video_hours": f"{video_hours:.2f}/{tier.video_hours_limit if tier.video_hours_limit != 9999 else '∞'}",
-            "files": f"{files_count}/{tier.files_limit if tier.files_limit != 9999 else '∞'}",
-            "photos": f"{photos_count}/{tier.photos_limit if tier.photos_limit != 9999 else '∞'}",
-            "texts": f"{texts_count}/{tier.texts_limit if tier.texts_limit != 9999 else '∞'}"
-        },
-        kb_daily={
-            "video_hours": f"{daily_video_hours:.2f}/{tier.daily_video_hours if tier.daily_video_hours != 9999 else '∞'}",
-            "files": f"{daily_files}/{tier.daily_files if tier.daily_files != 9999 else '∞'}",
-            "photos": f"{daily_photos}/{tier.daily_photos if tier.daily_photos != 9999 else '∞'}",
-            "texts": f"{daily_texts}/{tier.daily_texts if tier.daily_texts != 9999 else '∞'}"
-        }
-    )
-
-
-# ЭНДПОИНТЫ ПОДПИСОК
-
-# Получаем список доступных к покупке подписок
-@app.get("/subscriptions/tiers", response_model=list[schemas.SubscriptionTierResponse])
-def get_subscription_tiers(db: Session = Depends(get_db)):
-    logger.debug("Запрос списка тарифных планов")
-
-    tiers = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.tier_name.notin_(["free", "admin"])
-    ).order_by(models.SubscriptionTier.price_rubles).all()
-
-    logger.debug(f"Возвращено {len(tiers)} тарифных планов")
-    return tiers
-
-
-# ЭНДПОИНТЫ БАЗЫ ЗНАНИЙ
-
-# Загрузка текста в базу знаний
-@app.post("/kb/upload/text", response_model=schemas.TextUploadResponse)
-def upload_text_to_kb(data: schemas.TextUploadRequest, db: Session = Depends(get_db)):
-    logger.info(f"Загрузка текста пользователем telegram_id={data.telegram_id}")
-
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
-    if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={data.telegram_id}")
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Получаем активную подписку
-    subscription = db.query(models.UserSubscription).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    if not subscription:
-        logger.error(f"У пользователя {data.telegram_id} нет активной подписки")
-        raise HTTPException(status_code=400, detail="No active subscription")
-
-    # Получаем тариф
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == subscription.tier_id
-    ).first()
-
-    # Проверяем лимиты через LimitsService
-    limits_service = LimitsService(db)
-    can_upload, error = limits_service.check_text_limits(user.id, tier)
-    if not can_upload:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
-        raise HTTPException(status_code=400, detail=error)
-
-    # Создаём запись
-    new_doc = models.UserDocument(
-        user_id=user.id,
-        filename=f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-        file_type="text",
-        status="completed",
-        extracted_text=data.text,
-        file_url=None,
-        duration_hours=None
-    )
-
-    db.add(new_doc)
-    db.commit()
-    db.refresh(new_doc)
-
-    logger.info(f"Текст успешно загружен: document_id={new_doc.id}, user={data.telegram_id}")
-
-    return {"success": True, "document_id": new_doc.id}
-
-# Список всех файлов в базе знаний
-@app.get("/kb/documents/{telegram_id}", response_model=schemas.DocumentsListResponse)
-def get_user_documents(telegram_id: int, db: Session = Depends(get_db)):
-    logger.debug(f"Запрос списка документов: telegram_id={telegram_id}")
-
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
-    if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={telegram_id}")
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Получаем все НЕ удалённые файлы
-    documents = db.query(models.UserDocument).filter(
-        models.UserDocument.user_id == user.id,
-        models.UserDocument.is_deleted == False
-    ).order_by(models.UserDocument.upload_date.desc()).all()
-
-    logger.debug(f"Возвращено {len(documents)} документов для пользователя {telegram_id}")
-
-    return {
-        "documents": documents,
-        "total_count": len(documents)
-    }
-
-
-# Создание задач на обработку видео
-@app.post("/kb/upload/video", response_model=schemas.VideoUploadResponse)
-def upload_videos_to_kb(data: schemas.VideoUploadRequest, db: Session = Depends(get_db)):
-    logger.info(f"Загрузка {len(data.videos)} видео пользователем telegram_id={data.telegram_id}")
-
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
-    if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={data.telegram_id}")
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Получаем подписку и тариф для определения приоритета
-    subscription = db.query(models.UserSubscription).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == subscription.tier_id
-    ).first()
-
-    tier_name = tier.tier_name
-    priority = get_priority(tier_name)
-
-    logger.info(f"Приоритет обработки для пользователя {data.telegram_id} (тариф {tier_name}): {priority}")
-
-    # Создаём записи в БД для каждого видео
-    task_ids = []
-
-    for video in data.videos:
-        new_doc = models.UserDocument(
-            user_id=user.id,
-            filename=video['title'],
-            file_type="video",
-            status="pending",
-            file_url=video['url'],
-            duration_hours=video['duration'],
-            extracted_text=None
-        )
-
-        db.add(new_doc)
-        db.commit()
-        db.refresh(new_doc)
-
-        # Запускаем Celery задачу с приоритетом
-        task = process_video.apply_async(
-            args=[video['url'], new_doc.id],
-            priority=priority
-        )
-        task_ids.append(task.id)
-
-        logger.info(f"Создана задача на обработку видео: task_id={task.id}, document_id={new_doc.id}")
-
-    return {
-        "success": True,
-        "task_id": ",".join(task_ids),
-        "message": f"Добавлено {len(data.videos)} видео в обработку"
-    }
-
-# Определяем приоритет обработки видео
 def get_priority(tier: str) -> int:
+    """
+    Определить приоритет обработки задачи по тарифу.
+
+    Args:
+        tier: Название тарифа
+
+    Returns:
+        Приоритет (0 = highest, 10 = lowest)
+    """
     priorities = {
         'admin': 0,
         'ultra': 1,
@@ -371,10 +97,215 @@ def get_priority(tier: str) -> int:
     }
     return priorities.get(tier, 4)
 
-# Проверка статуса обработки видео
+
+# ============================================================================
+# ЭНДПОИНТЫ ПОЛЬЗОВАТЕЛЕЙ
+# ============================================================================
+
+@app.post("/users/register", response_model=schemas.UserResponse)
+@limiter.limit("10/minute")
+def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    """
+    Регистрация нового пользователя или авторизация существующего.
+
+    При регистрации автоматически назначается бесплатная подписка.
+    """
+    logger.info(f"Запрос регистрации: telegram_id={user.telegram_id}")
+
+    user_service = UserService(db)
+
+    registered_user = user_service.register_or_get_user(
+        telegram_id=user.telegram_id,
+        username=user.username,
+        referred_by=user.referred_by
+    )
+
+    return registered_user
+
+
+@app.get("/users/{telegram_id}/stats", response_model=schemas.UserStats)
+@limiter.limit("30/minute")
+def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
+    """
+    Получить статистику пользователя для главного меню.
+
+    Включает информацию о подписке, лимитах и использовании базы знаний.
+    """
+    logger.debug(f"Запрос статистики: telegram_id={telegram_id}")
+
+    user_service = UserService(db)
+
+    try:
+        stats = user_service.get_user_stats(telegram_id)
+        return stats
+    except ValueError as e:
+        logger.warning(f"Ошибка получения статистики: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# ============================================================================
+# ЭНДПОИНТЫ ПОДПИСОК
+# ============================================================================
+
+@app.get("/subscriptions/tiers", response_model=list[schemas.SubscriptionTierResponse])
+@limiter.limit("20/minute")
+def get_subscription_tiers(db: Session = Depends(get_db)):
+    """
+    Получить список доступных для покупки тарифных планов.
+
+    Исключает внутренние тарифы (free, admin).
+    """
+    logger.debug("Запрос списка тарифных планов")
+
+    subscription_service = SubscriptionService(db)
+    tiers = subscription_service.get_all_tiers(exclude_internal=True)
+
+    logger.debug(f"Возвращено {len(tiers)} тарифных планов")
+    return tiers
+
+
+# ============================================================================
+# ЭНДПОИНТЫ БАЗЫ ЗНАНИЙ
+# ============================================================================
+
+@app.post("/kb/upload/text", response_model=schemas.TextUploadResponse)
+@limiter.limit("20/minute")
+def upload_text_to_kb(data: schemas.TextUploadRequest, db: Session = Depends(get_db)):
+    """
+    Загрузить текст в базу знаний.
+
+    Проверяет лимиты пользователя перед загрузкой.
+    """
+    logger.info(f"Загрузка текста: telegram_id={data.telegram_id}")
+
+    user_service = UserService(db)
+    subscription_service = SubscriptionService(db)
+    limits_service = LimitsService(db)
+    document_service = DocumentService(db)
+
+    # Получаем пользователя
+    user = user_service.get_user_by_telegram_id(data.telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Получаем активную подписку
+    subscription_info = subscription_service.get_active_subscription(user.id)
+    if not subscription_info:
+        raise HTTPException(status_code=400, detail="No active subscription")
+
+    _, tier = subscription_info
+
+    # Проверяем лимиты
+    can_upload, error = limits_service.check_text_limits(user.id, tier)
+    if not can_upload:
+        logger.warning(f"Превышен лимит: user={data.telegram_id}, error={error}")
+        raise HTTPException(status_code=400, detail=error)
+
+    # Создаём документ
+    new_doc = document_service.create_document(
+        user_id=user.id,
+        filename=f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+        file_type="text",
+        status="completed",
+        extracted_text=data.text
+    )
+
+    logger.info(f"Текст загружен: document_id={new_doc.id}, user={data.telegram_id}")
+
+    return {"success": True, "document_id": new_doc.id}
+
+
+@app.get("/kb/documents/{telegram_id}", response_model=schemas.DocumentsListResponse)
+@limiter.limit("30/minute")
+def get_user_documents(telegram_id: int, db: Session = Depends(get_db)):
+    """
+    Получить список всех документов пользователя в базе знаний.
+
+    Возвращает только неудалённые документы.
+    """
+    logger.debug(f"Запрос списка документов: telegram_id={telegram_id}")
+
+    user_service = UserService(db)
+    document_service = DocumentService(db)
+
+    user = user_service.get_user_by_telegram_id(telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    documents = document_service.get_user_documents(user.id)
+
+    logger.debug(f"Возвращено {len(documents)} документов")
+
+    return {
+        "documents": documents,
+        "total_count": len(documents)
+    }
+
+
+@app.post("/kb/upload/video", response_model=schemas.VideoUploadResponse)
+@limiter.limit("10/minute")
+def upload_videos_to_kb(data: schemas.VideoUploadRequest, db: Session = Depends(get_db)):
+    """
+    Загрузить видео в базу знаний для обработки.
+
+    Создаёт Celery задачи для транскрибации видео.
+    """
+    logger.info(f"Загрузка {len(data.videos)} видео: telegram_id={data.telegram_id}")
+
+    user_service = UserService(db)
+    subscription_service = SubscriptionService(db)
+    document_service = DocumentService(db)
+
+    user = user_service.get_user_by_telegram_id(data.telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Получаем тариф для определения приоритета
+    subscription_info = subscription_service.get_active_subscription(user.id)
+    if not subscription_info:
+        raise HTTPException(status_code=400, detail="No active subscription")
+
+    _, tier = subscription_info
+    priority = get_priority(tier.tier_name)
+
+    logger.info(f"Приоритет обработки: {priority} (tier={tier.tier_name})")
+
+    # Создаём документы и задачи
+    task_ids = []
+
+    for video in data.videos:
+        new_doc = document_service.create_document(
+            user_id=user.id,
+            filename=video['title'],
+            file_type="video",
+            status="pending",
+            file_url=video['url'],
+            duration_hours=video['duration']
+        )
+
+        # Запускаем Celery задачу
+        task = process_video.apply_async(
+            args=[video['url'], new_doc.id],
+            priority=priority
+        )
+        task_ids.append(task.id)
+
+        logger.info(f"Создана задача: task_id={task.id}, document_id={new_doc.id}")
+
+    return {
+        "success": True,
+        "task_id": ",".join(task_ids),
+        "message": f"Добавлено {len(data.videos)} видео в обработку"
+    }
+
+
 @app.get("/kb/video/status/{task_id}", response_model=schemas.VideoStatusResponse)
+@limiter.limit("60/minute")
 def get_video_status(task_id: str):
-    logger.debug(f"Проверка статуса задачи: task_id={task_id}")
+    """
+    Проверить статус обработки видео по ID задачи.
+    """
+    logger.debug(f"Проверка статуса: task_id={task_id}")
 
     task = AsyncResult(task_id, app=celery_app)
 
@@ -385,42 +316,50 @@ def get_video_status(task_id: str):
         "error": str(task.info) if task.state == 'FAILURE' else None
     }
 
-# Обновление статуса обработки
+
 @app.put("/kb/documents/{document_id}/status")
+@limiter.limit("100/minute")
 def update_document_status(document_id: int, data: dict, db: Session = Depends(get_db)):
-    logger.debug(f"Обновление статуса документа: document_id={document_id}, status={data.get('status')}")
+    """
+    Обновить статус обработки документа.
 
-    doc = db.query(models.UserDocument).filter(models.UserDocument.id == document_id).first()
-    if not doc:
-        logger.warning(f"Документ не найден: document_id={document_id}")
+    Используется Celery задачами для обновления прогресса.
+    """
+    logger.debug(f"Обновление статуса: document_id={document_id}, status={data.get('status')}")
+
+    document_service = DocumentService(db)
+
+    success = document_service.update_document_status(
+        document_id=document_id,
+        status=data.get('status'),
+        error=data.get('error'),
+        transcription=data.get('transcription')
+    )
+
+    if not success:
         raise HTTPException(status_code=404, detail="Document not found")
-
-    doc.status = data.get('status')
-
-    if data.get('error'):
-        doc.status = 'failed'
-        logger.error(f"Ошибка обработки документа {document_id}: {data.get('error')}")
-
-    if data.get('transcription'):
-        doc.extracted_text = data['transcription']
-
-    db.commit()
-
-    logger.info(f"Статус документа {document_id} обновлён: {doc.status}")
 
     return {"success": True}
 
-# Возвращаем информацию о документе (для видео и фото)
-@app.get("/kb/documents/{document_id}/info")
-def get_document_info(document_id: int, db: Session = Depends(get_db)):
-    logger.debug(f"Запрос информации о документе: document_id={document_id}")
 
-    doc = db.query(models.UserDocument).filter(models.UserDocument.id == document_id).first()
+@app.get("/kb/documents/{document_id}/info")
+@limiter.limit("60/minute")
+def get_document_info(document_id: int, db: Session = Depends(get_db)):
+    """
+    Получить информацию о документе.
+
+    Возвращает данные для отправки уведомлений пользователю.
+    """
+    logger.debug(f"Запрос информации: document_id={document_id}")
+
+    user_service = UserService(db)
+    document_service = DocumentService(db)
+
+    doc = document_service.get_document_by_id(document_id)
     if not doc:
-        logger.warning(f"Документ не найден: document_id={document_id}")
         raise HTTPException(status_code=404, detail="Document not found")
 
-    user = db.query(models.User).filter(models.User.id == doc.user_id).first()
+    user = user_service.get_user_by_id(doc.user_id)
 
     return {
         "telegram_id": user.telegram_id,
@@ -430,79 +369,65 @@ def get_document_info(document_id: int, db: Session = Depends(get_db)):
         "status": doc.status
     }
 
-# Загрузка фото в базу знаний
-@app.post("/kb/upload/photos", response_model=schemas.PhotoUploadResponse)
-def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(get_db)):
-    logger.info(f"Загрузка {len(data.photos)} фото пользователем telegram_id={data.telegram_id}")
 
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+@app.post("/kb/upload/photos", response_model=schemas.PhotoUploadResponse)
+@limiter.limit("10/minute")
+def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(get_db)):
+    """
+    Загрузить фото в базу знаний для OCR.
+    """
+    logger.info(f"Загрузка {len(data.photos)} фото: telegram_id={data.telegram_id}")
+
+    user_service = UserService(db)
+    subscription_service = SubscriptionService(db)
+    limits_service = LimitsService(db)
+    document_service = DocumentService(db)
+
+    user = user_service.get_user_by_telegram_id(data.telegram_id)
     if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={data.telegram_id}")
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Получаем подписку и тариф
-    subscription = db.query(models.UserSubscription).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    if not subscription:
-        logger.error(f"У пользователя {data.telegram_id} нет активной подписки")
+    # Получаем тариф
+    subscription_info = subscription_service.get_active_subscription(user.id)
+    if not subscription_info:
         raise HTTPException(status_code=400, detail="No active subscription")
 
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == subscription.tier_id
-    ).first()
+    _, tier = subscription_info
 
-    # Проверяем лимиты через LimitsService
-    limits_service = LimitsService(db)
+    # Проверяем лимиты
     can_upload, error = limits_service.check_photo_limits(user.id, tier)
     if not can_upload:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
         raise HTTPException(status_code=400, detail=error)
 
-    # Определяем приоритет
-    tier_name = tier.tier_name
-    priority = get_priority(tier_name)
-
-    # Создаём записи в БД для каждого фото и запускаем задачи
+    priority = get_priority(tier.tier_name)
     task_ids = []
 
-    from s3_storage import upload_photo_to_s3, process_photo_ocr
-
     for photo in data.photos:
-        # Создаём запись в БД
-        new_doc = models.UserDocument(
+        # Создаём документ
+        new_doc = document_service.create_document(
             user_id=user.id,
             filename=photo['filename'],
             file_type="photo",
-            status="pending",
-            extracted_text=None,
-            file_url=None,
-            duration_hours=None
+            status="pending"
         )
 
-        db.add(new_doc)
-        db.commit()
-        db.refresh(new_doc)
-
-        # Загружаем фото в S3
+        # Загружаем в S3
         s3_key = upload_photo_to_s3(photo['base64'], user.id, new_doc.id)
-
-        # Сохраняем S3 URL в БД
         s3_url = f"{S3_BASE_URL}/{s3_key}"
-        new_doc.file_url = s3_url
+
+        # Обновляем URL
+        doc = document_service.get_document_by_id(new_doc.id)
+        doc.file_url = s3_url
         db.commit()
 
-        # Запускаем Celery задачу с приоритетом
+        # Запускаем OCR
         task = process_photo_ocr.apply_async(
             args=[new_doc.id, s3_key],
             priority=priority
         )
         task_ids.append(task.id)
 
-        logger.info(f"Создана задача на OCR фото: task_id={task.id}, document_id={new_doc.id}")
+        logger.info(f"OCR задача создана: task_id={task.id}, document_id={new_doc.id}")
 
     return {
         "success": True,
@@ -510,28 +435,30 @@ def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(
         "task_ids": task_ids
     }
 
-# Получение presigned URL для фото
+
 @app.get("/kb/photo/{document_id}/presigned")
-def get_photo_presigned_url_endpoint(document_id: int, telegram_id: int, db: Session = Depends(get_db)):
-    logger.debug(f"Запрос presigned URL для фото: document_id={document_id}, telegram_id={telegram_id}")
+@limiter.limit("60/minute")
+def get_photo_presigned_url_endpoint(
+    document_id: int,
+    telegram_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Получить presigned URL для просмотра оригинального фото.
+    """
+    logger.debug(f"Запрос presigned URL: document_id={document_id}, telegram_id={telegram_id}")
 
-    # Находим пользователя
-    user = db.query(models.User).filter(
-        models.User.telegram_id == telegram_id
-    ).first()
+    user_service = UserService(db)
+    document_service = DocumentService(db)
 
+    # Проверяем пользователя
+    user = user_service.get_user_by_telegram_id(telegram_id)
     if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={telegram_id}")
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Находим документ
-    doc = db.query(models.UserDocument).filter(
-        models.UserDocument.id == document_id,
-        models.UserDocument.file_type == "photo"
-    ).first()
-
-    if not doc:
-        logger.warning(f"Фото не найдено: document_id={document_id}")
+    # Получаем документ
+    doc = document_service.get_document_by_id(document_id)
+    if not doc or doc.file_type != "photo":
         raise HTTPException(status_code=404, detail="Photo not found")
 
     # ПРОВЕРКА ПРАВ ДОСТУПА
@@ -539,83 +466,77 @@ def get_photo_presigned_url_endpoint(document_id: int, telegram_id: int, db: Ses
         logger.warning(f"Попытка доступа к чужому фото: user={user.id}, doc.user_id={doc.user_id}")
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # Извлекаем S3 ключ
+    s3_key = doc.file_url.replace(f"{S3_BASE_URL}/", "")
 
-# Загрузка файлов в базу знаний
+    # Генерируем URL
+    presigned_url = get_photo_presigned_url(s3_key, expiration=3600)
+
+    return {
+        "presigned_url": presigned_url,
+        "expires_in": 3600
+    }
+
+
 @app.post("/kb/upload/files", response_model=schemas.FileUploadResponse)
+@limiter.limit("10/minute")
 def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(get_db)):
-    logger.info(f"Загрузка {len(data.files)} файлов пользователем telegram_id={data.telegram_id}")
+    """
+    Загрузить файлы (TXT, PDF, DOCX) в базу знаний.
+    """
+    logger.info(f"Загрузка {len(data.files)} файлов: telegram_id={data.telegram_id}")
 
-    # Находим пользователя
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+    user_service = UserService(db)
+    subscription_service = SubscriptionService(db)
+    limits_service = LimitsService(db)
+    document_service = DocumentService(db)
+
+    user = user_service.get_user_by_telegram_id(data.telegram_id)
     if not user:
-        logger.warning(f"Пользователь не найден: telegram_id={data.telegram_id}")
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Получаем подписку и тариф
-    subscription = db.query(models.UserSubscription).filter(
-        models.UserSubscription.user_id == user.id,
-        models.UserSubscription.status == "active"
-    ).first()
-
-    if not subscription:
-        logger.error(f"У пользователя {data.telegram_id} нет активной подписки")
+    subscription_info = subscription_service.get_active_subscription(user.id)
+    if not subscription_info:
         raise HTTPException(status_code=400, detail="No active subscription")
 
-    tier = db.query(models.SubscriptionTier).filter(
-        models.SubscriptionTier.id == subscription.tier_id
-    ).first()
+    _, tier = subscription_info
 
-    # Проверяем лимиты через LimitsService
-    limits_service = LimitsService(db)
+    # Проверяем лимиты
     can_upload, error = limits_service.check_file_limits(user.id, tier)
     if not can_upload:
-        logger.warning(f"Пользователь {data.telegram_id} превысил лимит: {error}")
         raise HTTPException(status_code=400, detail=error)
 
-    # Определяем приоритет
-    tier_name = tier.tier_name
-    priority = get_priority(tier_name)
-
-    # Создаём записи в БД для каждого файла и запускаем задачи
+    priority = get_priority(tier.tier_name)
     task_ids = []
 
-    from s3_storage import upload_file_to_s3, process_file
-
     for file_data in data.files:
-        # Определяем расширение
         extension = file_data['filename'].split('.')[-1].lower()
 
-        # Создаём запись в БД
-        new_doc = models.UserDocument(
+        # Создаём документ
+        new_doc = document_service.create_document(
             user_id=user.id,
             filename=file_data['filename'],
             file_type="file",
-            status="pending",
-            extracted_text=None,
-            file_url=None,
-            duration_hours=None
+            status="pending"
         )
 
-        db.add(new_doc)
-        db.commit()
-        db.refresh(new_doc)
-
-        # Загружаем файл в S3
+        # Загружаем в S3
         s3_key = upload_file_to_s3(file_data['file_bytes'], user.id, new_doc.id, extension)
-
-        # Сохраняем S3 URL в БД
         s3_url = f"{S3_BASE_URL}/{s3_key}"
-        new_doc.file_url = s3_url
+
+        # Обновляем URL
+        doc = document_service.get_document_by_id(new_doc.id)
+        doc.file_url = s3_url
         db.commit()
 
-        # Запускаем Celery задачу с приоритетом
+        # Запускаем обработку
         task = process_file.apply_async(
             args=[new_doc.id, s3_key, file_data['mime_type']],
             priority=priority
         )
         task_ids.append(task.id)
 
-        logger.info(f"Создана задача на обработку файла: task_id={task.id}, document_id={new_doc.id}")
+        logger.info(f"Файл обработка: task_id={task.id}, document_id={new_doc.id}")
 
     return {
         "success": True,
@@ -624,48 +545,45 @@ def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(ge
     }
 
 
-# Удаление файла из базы знаний
 @app.delete("/kb/documents/{document_id}")
+@limiter.limit("30/minute")
 def delete_document(document_id: int, db: Session = Depends(get_db)):
-    logger.info(f"Запрос на удаление документа: document_id={document_id}")
+    """
+    Удалить документ из базы знаний (мягкое удаление).
 
-    # Находим файл
-    document = db.query(models.UserDocument).filter(
-        models.UserDocument.id == document_id
-    ).first()
+    Для фото и файлов также удаляется объект из S3.
+    """
+    logger.info(f"Запрос на удаление: document_id={document_id}")
 
+    document_service = DocumentService(db)
+
+    document = document_service.get_document_by_id(document_id)
     if not document:
-        logger.warning(f"Документ не найден: document_id={document_id}")
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Если это фото или файл — удаляем из S3
+    # Удаляем из S3 если это фото или файл
     if document.file_type in ["photo", "file"] and document.file_url:
         try:
             s3_key = document.file_url.replace(f"{S3_BASE_URL}/", "")
-
-            # Удаляем из S3 через универсальную функцию
-            from s3_storage import delete_from_s3
             delete_from_s3(s3_key)
-
-            logger.info(f"Файл удалён из S3: s3_key={s3_key}")
+            logger.info(f"Удалён из S3: {s3_key}")
         except Exception as e:
-            logger.error(f"Не удалось извлечь s3_key или удалить файл: {e}")
+            logger.error(f"Ошибка удаления из S3: {e}")
 
-    # Мягкое удаление с очисткой текста
-    document.is_deleted = True
-    document.deleted_at = datetime.now()
-    document.extracted_text = ""
+    # Мягкое удаление
+    document_service.soft_delete_document(document_id)
 
-    db.commit()
-
-    logger.info(f"Документ {document_id} помечен как удалённый")
+    logger.info(f"Документ {document_id} удалён")
 
     return {"success": True, "message": "Document deleted"}
 
 
-# Запуск сервера
+# ============================================================================
+# ЗАПУСК СЕРВЕРА
+# ============================================================================
+
 if __name__ == "__main__":
-    logger.info(f"Запуск API сервера на {os.getenv('API_HOST')}:{os.getenv('API_PORT')}")
+    logger.info(f"Запуск API на {os.getenv('API_HOST')}:{os.getenv('API_PORT')}")
 
     uvicorn.run(
         app,
