@@ -67,6 +67,11 @@ from bot.bot_subscriptions import (
 # Executor для блокирующих операций (импортируем из video_handlers)
 from bot.handlers.video_handlers import executor
 
+import logging
+
+# Отключаем verbose логи от библиотек
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # ============================================================================
 # РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
@@ -130,13 +135,9 @@ async def start(update: Update, context):
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
 
-# ============================================================================
-# ГЛАВНОЕ МЕНЮ
-# ============================================================================
-
 async def build_main_menu(user_id: int, first_name: str):
     """
-    Формирование главного меню с статистикой.
+    Формирование главного меню со статистикой.
 
     Args:
         user_id: ID пользователя
@@ -155,61 +156,64 @@ async def build_main_menu(user_id: int, first_name: str):
     subscription_name = stats["subscription_name"]
     subscription_tier = stats["subscription_tier"]
     subscription_end = stats.get("subscription_end")
-    messages_left = stats["messages_limit"] - stats["messages_today"]
+    messages_today = stats["messages_today"]
     messages_total = stats["messages_limit"]
 
     kb_storage = stats["kb_storage"]
     kb_daily = stats["kb_daily"]
 
-    welcome_text = f"""
-👋 Привет, {first_name}!
+    welcome_text = f"""👋 Привет, {first_name}!
 
 Твой доступ к последним моделям ChatGPT 
 с персональной базой знаний начинается тут.
 
-🤑 Подписка: {subscription_name}
-"""
+🤑 Подписка: {subscription_name}"""
 
     if subscription_end:
-        welcome_text += f"   Активна до: {subscription_end[:10]}\n"
+        welcome_text += f"\n   Активна до: {subscription_end[:10]}"
 
     welcome_text += f"""
-💬 Сообщений: {messages_left}/{messages_total} сегодня
 
-📚 Ваша база знаний:
-"""
+💬 Сообщений: {messages_today}/{messages_total} сегодня
 
-    # Показываем типы файлов через CONTENT_CONFIG
-    for content_type, config in CONTENT_CONFIG.items():
+📚 Ваша база знаний:"""
+
+    content_order = ["video", "file", "photo", "text"]
+
+    for content_type in content_order:
+        config = CONTENT_CONFIG[content_type]
         storage_value = kb_storage.get(config["storage_key"])
 
-        if storage_value and storage_value not in ["0/0"]:
-            if "∞" in storage_value:
-                welcome_text += f"   {config['icon']} {config['title_plural']}: {storage_value} {config['unit']}\n"
+        if storage_value and storage_value not in ["0/0", "0.00/0"]:
+            if content_type == "video":
+                welcome_text += f"\n   {config['icon']} {config['title_plural']}: {storage_value} {config['unit']}"
             else:
-                welcome_text += f"   {config['icon']} {config['title_plural']}: {storage_value}\n"
+                welcome_text += f"\n   {config['icon']} {config['title_plural']}: {storage_value}"
 
     welcome_text += """
-📤 Лимит загрузки сегодня:
-"""
 
-    # Показываем дневные лимиты
-    for content_type, config in CONTENT_CONFIG.items():
+📤 Лимит загрузки сегодня:"""
+
+    for content_type in content_order:
+        config = CONTENT_CONFIG[content_type]
         daily_value = kb_daily.get(config["daily_key"])
 
-        if daily_value and daily_value not in ["0/0"]:
-            if "∞" in daily_value:
-                welcome_text += f"   {config['icon']} {config['title_plural']}: {daily_value} {config['unit']}\n"
+        if daily_value and daily_value not in ["0/0", "0.00/0"]:
+            if content_type == "video":
+                welcome_text += f"\n   {config['icon']} {config['title_plural']}: {daily_value} {config['unit']}"
             else:
-                welcome_text += f"   {config['icon']} {config['title_plural']}: {daily_value}"
+                welcome_text += f"\n   {config['icon']} {config['title_plural']}: {daily_value}"
 
     # Предложение апгрейда
     if subscription_tier not in ["ultra", "admin"]:
         welcome_text += "\n\n💎 Расширь свои возможности — купи \nследующий уровень подписки!"
 
+    # Все 5 кнопок
     keyboard = [
         [InlineKeyboardButton("⭐ Подписки", callback_data="subscriptions")],
-        [InlineKeyboardButton("📚 База знаний", callback_data="knowledge_base")]
+        [InlineKeyboardButton("📚 База знаний бота", callback_data="knowledge_base")],
+        [InlineKeyboardButton("⚙️ Режимы ответов", callback_data="settings_mode")],
+        [InlineKeyboardButton("🆘 Тех. поддержка", callback_data="support")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 

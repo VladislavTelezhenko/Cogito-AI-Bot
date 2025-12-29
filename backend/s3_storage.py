@@ -1,6 +1,6 @@
 # Работа с объектным хранилищем S3 и Celery задачи
 
-from celery_app import celery_app
+from backend.celery_app import celery_app
 import boto3
 import yt_dlp
 import ffmpeg
@@ -15,7 +15,7 @@ from utils.iam_manager import get_new_iam_token, get_new_vision_iam_token
 import io
 from pdf2image import convert_from_bytes
 from docx import Document
-from shared.config import settings, DocumentStatus, NOTIFICATION_TEMPLATES
+from shared.config import settings, DocumentStatus, NOTIFICATION_TEMPLATES, S3_BASE_URL
 from typing import Optional, Tuple
 import logging
 import base64

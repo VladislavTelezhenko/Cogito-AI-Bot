@@ -9,7 +9,7 @@ FastAPI приложение - основной API сервер бота.
 """
 
 import os
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from sqlalchemy.orm import Session
 from datetime import datetime
 import uvicorn
@@ -44,11 +44,15 @@ from backend.services import (
 )
 
 # Настройка логирования
+BASE_DIR = Path(__file__).parent.parent
+LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/api.log', encoding='utf-8'),
+        logging.FileHandler(LOGS_DIR / 'api.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -104,7 +108,7 @@ def get_priority(tier: str) -> int:
 
 @app.post("/users/register", response_model=schemas.UserResponse)
 @limiter.limit("10/minute")
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def register_user(request: Request, user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
     Регистрация нового пользователя или авторизация существующего.
 
@@ -125,7 +129,7 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.get("/users/{telegram_id}/stats", response_model=schemas.UserStats)
 @limiter.limit("30/minute")
-def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
+def get_user_stats(request: Request, telegram_id: int, db: Session = Depends(get_db)):
     """
     Получить статистику пользователя для главного меню.
 
@@ -149,7 +153,7 @@ def get_user_stats(telegram_id: int, db: Session = Depends(get_db)):
 
 @app.get("/subscriptions/tiers", response_model=list[schemas.SubscriptionTierResponse])
 @limiter.limit("20/minute")
-def get_subscription_tiers(db: Session = Depends(get_db)):
+def get_subscription_tiers(request: Request, db: Session = Depends(get_db)):
     """
     Получить список доступных для покупки тарифных планов.
 
@@ -170,7 +174,7 @@ def get_subscription_tiers(db: Session = Depends(get_db)):
 
 @app.post("/kb/upload/text", response_model=schemas.TextUploadResponse)
 @limiter.limit("20/minute")
-def upload_text_to_kb(data: schemas.TextUploadRequest, db: Session = Depends(get_db)):
+def upload_text_to_kb(request: Request, data: schemas.TextUploadRequest, db: Session = Depends(get_db)):
     """
     Загрузить текст в базу знаний.
 
@@ -217,7 +221,7 @@ def upload_text_to_kb(data: schemas.TextUploadRequest, db: Session = Depends(get
 
 @app.get("/kb/documents/{telegram_id}", response_model=schemas.DocumentsListResponse)
 @limiter.limit("30/minute")
-def get_user_documents(telegram_id: int, db: Session = Depends(get_db)):
+def get_user_documents(request: Request, telegram_id: int, db: Session = Depends(get_db)):
     """
     Получить список всех документов пользователя в базе знаний.
 
@@ -244,7 +248,7 @@ def get_user_documents(telegram_id: int, db: Session = Depends(get_db)):
 
 @app.post("/kb/upload/video", response_model=schemas.VideoUploadResponse)
 @limiter.limit("10/minute")
-def upload_videos_to_kb(data: schemas.VideoUploadRequest, db: Session = Depends(get_db)):
+def upload_videos_to_kb(request: Request, data: schemas.VideoUploadRequest, db: Session = Depends(get_db)):
     """
     Загрузить видео в базу знаний для обработки.
 
@@ -301,7 +305,7 @@ def upload_videos_to_kb(data: schemas.VideoUploadRequest, db: Session = Depends(
 
 @app.get("/kb/video/status/{task_id}", response_model=schemas.VideoStatusResponse)
 @limiter.limit("60/minute")
-def get_video_status(task_id: str):
+def get_video_status(request: Request, task_id: str):
     """
     Проверить статус обработки видео по ID задачи.
     """
@@ -319,7 +323,7 @@ def get_video_status(task_id: str):
 
 @app.put("/kb/documents/{document_id}/status")
 @limiter.limit("100/minute")
-def update_document_status(document_id: int, data: dict, db: Session = Depends(get_db)):
+def update_document_status(request: Request, document_id: int, data: dict, db: Session = Depends(get_db)):
     """
     Обновить статус обработки документа.
 
@@ -344,7 +348,7 @@ def update_document_status(document_id: int, data: dict, db: Session = Depends(g
 
 @app.get("/kb/documents/{document_id}/info")
 @limiter.limit("60/minute")
-def get_document_info(document_id: int, db: Session = Depends(get_db)):
+def get_document_info(request: Request, document_id: int, db: Session = Depends(get_db)):
     """
     Получить информацию о документе.
 
@@ -372,7 +376,7 @@ def get_document_info(document_id: int, db: Session = Depends(get_db)):
 
 @app.post("/kb/upload/photos", response_model=schemas.PhotoUploadResponse)
 @limiter.limit("10/minute")
-def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(get_db)):
+def upload_photos_to_kb(request: Request, data: schemas.PhotoUploadRequest, db: Session = Depends(get_db)):
     """
     Загрузить фото в базу знаний для OCR.
     """
@@ -439,6 +443,7 @@ def upload_photos_to_kb(data: schemas.PhotoUploadRequest, db: Session = Depends(
 @app.get("/kb/photo/{document_id}/presigned")
 @limiter.limit("60/minute")
 def get_photo_presigned_url_endpoint(
+    request: Request,
     document_id: int,
     telegram_id: int,
     db: Session = Depends(get_db)
@@ -480,7 +485,7 @@ def get_photo_presigned_url_endpoint(
 
 @app.post("/kb/upload/files", response_model=schemas.FileUploadResponse)
 @limiter.limit("10/minute")
-def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(get_db)):
+def upload_files_to_kb(request: Request, data: schemas.FileUploadRequest, db: Session = Depends(get_db)):
     """
     Загрузить файлы (TXT, PDF, DOCX) в базу знаний.
     """
@@ -547,7 +552,7 @@ def upload_files_to_kb(data: schemas.FileUploadRequest, db: Session = Depends(ge
 
 @app.delete("/kb/documents/{document_id}")
 @limiter.limit("30/minute")
-def delete_document(document_id: int, db: Session = Depends(get_db)):
+def delete_document(request: Request, document_id: int, db: Session = Depends(get_db)):
     """
     Удалить документ из базы знаний (мягкое удаление).
 

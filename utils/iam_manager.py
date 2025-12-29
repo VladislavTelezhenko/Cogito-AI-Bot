@@ -9,19 +9,26 @@ import logging
 from dotenv import load_dotenv, set_key
 from pathlib import Path
 
+# Пути к файлам
+BASE_DIR = Path(__file__).parent.parent  # Корень проекта
+SECRET_DIR = BASE_DIR / 'secret'
+LOGS_DIR = BASE_DIR / 'logs'
+env_path = SECRET_DIR / '.env'
+
+# Создаём папку logs если её нет
+LOGS_DIR.mkdir(exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('iam_manager.log', encoding='utf-8'),
+        logging.FileHandler(LOGS_DIR / 'iam_manager.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-env_path = Path(__file__).parent.parent / 'secret' / '.env'
 load_dotenv(dotenv_path=env_path)
 
 
@@ -30,7 +37,10 @@ def get_new_iam_token():
     logger.info("Запрос на обновление SpeechKit IAM токена...")
 
     try:
-        with open('key.json', 'r') as f:
+        # Путь к key.json в папке secret
+        key_path = SECRET_DIR / 'key.json'
+
+        with open(key_path, 'r') as f:
             key_data = json.load(f)
 
         now = int(time.time())
@@ -56,9 +66,8 @@ def get_new_iam_token():
         if response.status_code == 200:
             iam_token = response.json()['iamToken']
 
-            # Обновляем .env
-            env_path = os.path.join(os.getcwd(), '.env')
-            set_key(env_path, 'YANDEX_IAM_TOKEN', iam_token)
+            # Обновляем .env в папке secret
+            set_key(str(env_path), 'YANDEX_IAM_TOKEN', iam_token)
 
             logger.info("✅ SpeechKit IAM токен успешно обновлён")
             return iam_token
@@ -67,7 +76,7 @@ def get_new_iam_token():
             return None
 
     except FileNotFoundError:
-        logger.error("❌ Файл key.json не найден")
+        logger.error(f"❌ Файл key.json не найден в папке {SECRET_DIR}")
         return None
     except Exception as e:
         logger.error(f"❌ Неожиданная ошибка при обновлении SpeechKit токена: {e}")
@@ -79,7 +88,10 @@ def get_new_vision_iam_token():
     logger.info("Запрос на обновление Vision IAM токена...")
 
     try:
-        with open('ocr_key.json', 'r') as f:
+        # Путь к ocr_key.json в папке secret
+        key_path = SECRET_DIR / 'ocr_key.json'
+
+        with open(key_path, 'r') as f:
             key_data = json.load(f)
 
         now = int(time.time())
@@ -105,9 +117,8 @@ def get_new_vision_iam_token():
         if response.status_code == 200:
             iam_token = response.json()['iamToken']
 
-            # Обновляем .env
-            env_path = os.path.join(os.getcwd(), '.env')
-            set_key(env_path, 'YANDEX_VISION_IAM_TOKEN', iam_token)
+            # Обновляем .env в папке secret
+            set_key(str(env_path), 'YANDEX_VISION_IAM_TOKEN', iam_token)
 
             logger.info("✅ Vision IAM токен успешно обновлён")
             return iam_token
@@ -116,7 +127,7 @@ def get_new_vision_iam_token():
             return None
 
     except FileNotFoundError:
-        logger.error("❌ Файл ocr_key.json не найден")
+        logger.error(f"❌ Файл ocr_key.json не найден в папке {SECRET_DIR}")
         return None
     except Exception as e:
         logger.error(f"❌ Неожиданная ошибка при обновлении Vision токена: {e}")

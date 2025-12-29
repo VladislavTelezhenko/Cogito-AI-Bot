@@ -4,13 +4,21 @@ import redis
 import subprocess
 import sys
 import logging
+from pathlib import Path
+
+# Пути к файлам
+BASE_DIR = Path(__file__).parent.parent  # Корень проекта
+LOGS_DIR = BASE_DIR / 'logs'
+
+# Создаём папку logs если её нет
+LOGS_DIR.mkdir(exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/run.log', encoding='utf-8'),
+        logging.FileHandler(LOGS_DIR / 'run.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -27,7 +35,7 @@ def check_redis():
         return True
     except Exception as e:
         logger.error(f"❌ Redis не запущен! Ошибка: {e}")
-        logger.info("   Запустите: redis-server.exe")
+        logger.info("   Запустите: redis-server")
         return False
 
 
@@ -50,7 +58,6 @@ def main():
         logger.info("▶ Запуск Celery Worker...")
         celery = subprocess.Popen(
             ['celery', '-A', 'backend.celery_app', 'worker', '--loglevel=info', '--pool=solo']
-            # 'celery', '-A', 'backend.celery_app', 'worker', '--beat', '--loglevel=info', '--pool=solo' - автообновление токена для сервера
         )
         processes.append(('Celery', celery))
 

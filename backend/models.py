@@ -1,6 +1,7 @@
 # Инструкция по инициализации таблиц и полей в базе данных PostgreSQL
 
 from sqlalchemy import Column, Integer, String, DateTime, Float, Text, Boolean, ForeignKey
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from backend.database import Base
 
@@ -23,6 +24,12 @@ class User(Base):
     # Кто пригласил пользователя
     referred_by = Column(Integer)
 
+    # Relationships
+    documents = relationship("UserDocument", back_populates="user")
+    actions = relationship("UserDailyAction", back_populates="user")
+    subscriptions = relationship("UserSubscription", back_populates="user")
+    transactions = relationship("Transaction", back_populates="user")
+
 
 # user_actions - лог действий пользователей
 class UserDailyAction(Base):
@@ -38,6 +45,10 @@ class UserDailyAction(Base):
     action_date = Column(DateTime, nullable=False)
     # Тип действия
     action_type = Column(String, nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="actions")
+    document = relationship("UserDocument", back_populates="actions")
 
 
 # user_documents - файлы пользователей в базе знаний
@@ -67,6 +78,10 @@ class UserDocument(Base):
     is_deleted = Column(Boolean, default=False)
     # Дата удаления
     deleted_at = Column(DateTime)
+
+    # Relationships
+    user = relationship("User", back_populates="documents")
+    actions = relationship("UserDailyAction", back_populates="document")
 
 
 # subscription_tiers - тарифные планы
@@ -105,6 +120,10 @@ class SubscriptionTier(Base):
     # Дневной лимит загрузки текстов
     daily_texts = Column(Integer, nullable=False)
 
+    # Relationships
+    subscriptions = relationship("UserSubscription", back_populates="tier")
+    transactions = relationship("Transaction", back_populates="tier")
+
 
 # transactions - оплаты подписок
 class Transaction(Base):
@@ -134,6 +153,11 @@ class Transaction(Base):
     # Дата завершения платежа
     completed_at = Column(DateTime)
 
+    # Relationships
+    user = relationship("User", back_populates="transactions")
+    tier = relationship("SubscriptionTier", back_populates="transactions")
+    subscription = relationship("UserSubscription", back_populates="transaction")
+
 
 # user_subscriptions - история изменения подписок пользователями
 class UserSubscription(Base):
@@ -159,3 +183,13 @@ class UserSubscription(Base):
     # Фактическая дата окончания
     # не равна плану в случае перехода на более высокий тариф
     end_date_fact = Column(DateTime)
+
+    # Relationships
+    user = relationship("User", back_populates="subscriptions")
+    tier = relationship("SubscriptionTier", back_populates="subscriptions")
+    transaction = relationship("Transaction", back_populates="subscription")
+
+    @property
+    def is_active(self):
+        # Проверка активности подписки
+        return self.status == "active" and (self.end_date_fact is None or self.end_date_fact > datetime.now())

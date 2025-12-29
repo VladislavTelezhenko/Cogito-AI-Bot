@@ -7,11 +7,14 @@
 import os
 import logging
 import re
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
+from pathlib import Path
+
 
 # Загрузка переменных окружения
-load_dotenv('secret/.env')
+env_path = Path(__file__).parent.parent / 'secret' / '.env'
+load_dotenv(dotenv_path=env_path)
 
 
 # ============================================================================
@@ -43,15 +46,18 @@ class Settings(BaseSettings):
     YANDEX_FOLDER_ID: str = os.getenv("YANDEX_FOLDER_ID")
     YANDEX_IAM_TOKEN: str = os.getenv("YANDEX_IAM_TOKEN")
     YANDEX_VISION_IAM_TOKEN: str = os.getenv("YANDEX_VISION_IAM_TOKEN")
+    YANDEX_VISION_FOLDER_ID: str = os.getenv("YANDEX_VISION_FOLDER_ID")
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-    class Config:
-        env_file = "secret/.env"
+    model_config = SettingsConfigDict(env_file=str(env_path))
 
 
 settings = Settings()
+
+# S3 Base URL
+S3_BASE_URL = f"https://storage.yandexcloud.net/{settings.YC_BUCKET_NAME}"
 
 
 # ============================================================================
@@ -116,6 +122,7 @@ CONTENT_CONFIG = {
         "icon": "📝",
         "title": "Текст",
         "title_plural": "Тексты",
+        "title_plural_lower": "тексты",
         "title_genitive": "текстов",
         "title_accusative": "текст",
         "storage_key": "texts",
@@ -124,12 +131,14 @@ CONTENT_CONFIG = {
         "callbacks": {
             "upload": "upload_text",
             "my_list": "my_texts"
-        }
+        },
+        "api_endpoint": "/kb/upload/text"
     },
     "video": {
         "icon": "🎥",
         "title": "Видео",
         "title_plural": "Видео",
+        "title_plural_lower": "видео",
         "title_genitive": "видео",
         "title_accusative": "видео",
         "storage_key": "video_hours",
@@ -138,12 +147,14 @@ CONTENT_CONFIG = {
         "callbacks": {
             "upload": "upload_video",
             "my_list": "my_videos"
-        }
+        },
+        "api_endpoint": "/kb/upload/video"
     },
     "photo": {
         "icon": "🖼",
         "title": "Фото",
         "title_plural": "Фото",
+        "title_plural_lower": "фото",
         "title_genitive": "фото",
         "title_accusative": "фото",
         "storage_key": "photos",
@@ -152,12 +163,14 @@ CONTENT_CONFIG = {
         "callbacks": {
             "upload": "upload_photo",
             "my_list": "my_photos"
-        }
+        },
+        "api_endpoint": "/kb/upload/photos"
     },
     "file": {
         "icon": "📄",
         "title": "Файл",
         "title_plural": "Файлы",
+        "title_plural_lower": "файлы",
         "title_genitive": "файлов",
         "title_accusative": "файл",
         "storage_key": "files",
@@ -166,24 +179,63 @@ CONTENT_CONFIG = {
         "callbacks": {
             "upload": "upload_file_doc",
             "my_list": "my_files_docs"
-        }
+        },
+        "api_endpoint": "/kb/upload/files"
     }
 }
+
+
+# ============================================================================
+# ШАБЛОНЫ УВЕДОМЛЕНИЙ
+# ============================================================================
+
+NOTIFICATION_TEMPLATES = {
+    "video": (
+        "✅ Видео обработано!\n\n"
+        "📹 {filename}\n\n"
+        "Теперь можете задавать вопросы по этому видео."
+    ),
+
+    "photo": (
+        "✅ Фото обработано!\n\n"
+        "🖼 Распознанный текст:\n\n"
+        "{text}"
+    ),
+
+    "photo_truncated": (
+        "✅ Фото обработано!\n\n"
+        "🖼 Распознанный текст (первые 900 символов):\n\n"
+        "{text}\n\n"
+        "...\n\n"
+        "📝 Полный текст доступен в базе знаний."
+    ),
+
+    "file": (
+        "✅ Файл обработан!\n\n"
+        "📄 {filename}\n"
+        "📊 Извлечено символов: {count}\n\n"
+        "Можете задавать вопросы по этому документу."
+    )
+}
+
 
 # ============================================================================
 # ЛОГИРОВАНИЕ
 # ============================================================================
 
+# Определяем путь к папке logs в корне проекта
+BASE_DIR = Path(__file__).parent.parent
+LOGS_DIR = BASE_DIR / 'logs'
+
 # Создание директории для логов
-if not os.path.exists('logs'):
-    os.makedirs('logs')
+LOGS_DIR.mkdir(exist_ok=True)
 
 # Базовая настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/app.log', encoding='utf-8'),
+        logging.FileHandler(LOGS_DIR / 'app.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )

@@ -6,7 +6,7 @@
 
 from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import logging
 
 from backend.models import SubscriptionTier, UserSubscription, User

@@ -8,7 +8,6 @@
 import aiohttp
 import asyncio
 from typing import Optional, Tuple, Dict, Any, List
-from datetime import datetime
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -236,7 +235,7 @@ class FileValidator:
 
 
 # ============================================================================
-# BUFFERED UPLOADER (С ИСПРАВЛЕНИЕМ RACE CONDITION)
+# BUFFERED UPLOADER
 # ============================================================================
 
 class BufferedUploader:
@@ -512,6 +511,16 @@ class ButtonFactory:
             InlineKeyboardButton
         """
         return InlineKeyboardButton("◀️ Назад", callback_data=callback)
+
+    @staticmethod
+    def back_to_main() -> InlineKeyboardButton:
+        """
+        Кнопка "Назад в главное меню".
+
+        Returns:
+            InlineKeyboardButton
+        """
+        return InlineKeyboardButton("◀️ Назад в меню", callback_data="main_menu")
 
     @staticmethod
     def upload_more(content_type: str) -> InlineKeyboardButton:

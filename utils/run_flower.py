@@ -1,16 +1,24 @@
-# Единый файл для запуска приложения
+# Единый файл для запуска приложения с Flower
 
 import redis
 import subprocess
 import sys
 import logging
+from pathlib import Path
+
+# Пути к файлам
+BASE_DIR = Path(__file__).parent.parent  # Корень проекта
+LOGS_DIR = BASE_DIR / 'logs'
+
+# Создаём папку logs если её нет
+LOGS_DIR.mkdir(exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/run.log', encoding='utf-8'),
+        logging.FileHandler(LOGS_DIR / 'run_flower.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -19,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Проверка готовности редиса
 def check_redis():
-    # Проверка подключения к Redis
+    """Проверка подключения к Redis"""
     try:
         r = redis.Redis(host='localhost', port=6379, db=0)
         r.ping()
@@ -27,12 +35,12 @@ def check_redis():
         return True
     except Exception as e:
         logger.error(f"❌ Redis не запущен! Ошибка: {e}")
-        logger.info("   Запустите: redis-server.exe")
+        logger.info("   Запустите: redis-server")
         return False
 
 
 def main():
-    logger.info("=== ЗАПУСК COGITO AI BOT ===")
+    logger.info("=== ЗАПУСК COGITO AI BOT (С FLOWER) ===")
 
     if not check_redis():
         logger.error("Невозможно запустить приложение без Redis")
