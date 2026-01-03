@@ -10,6 +10,7 @@ slowapi
 sqlalchemy
 psycopg2-binary
 alembic
+uliweb-alembic
 
 # Async
 aiohttp

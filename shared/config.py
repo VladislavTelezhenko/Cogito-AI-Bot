@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     # Telegram
     TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN")
+    # ID админа для тикет-системы
+    ADMIN_TELEGRAM_ID: int = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 
     # API
     API_URL: str = os.getenv("API_URL", "http://localhost:8000")

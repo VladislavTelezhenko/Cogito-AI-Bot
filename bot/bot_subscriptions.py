@@ -1,7 +1,7 @@
 # Handlers для работы с подписками
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from utils.bot_utils import api_request, ButtonFactory, logger
+from utils.bot_utils import api_request, logger
 
 
 # ============================================================================
@@ -19,7 +19,7 @@ async def subscriptions_menu(update: Update, context):
     if not success:
         await query.edit_message_text(
             "⚠️ Ошибка получения данных. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_to_main()]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")]])
         )
         return
 
@@ -94,7 +94,7 @@ async def subscriptions_menu(update: Update, context):
             callback_data=f"sub_{tier['tier_name']}"
         )])
 
-    keyboard.append([ButtonFactory.back_to_main()])
+    keyboard.append([InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
@@ -117,5 +117,5 @@ async def handle_subscription_selection(update: Update, context):
     await query.edit_message_text(
         "💳 Оплата подписок будет доступна в следующей версии!\n\n"
         f"Выбранный тариф: {tier_name}",
-        reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_to_main()]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")]])
     )

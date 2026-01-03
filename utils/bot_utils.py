@@ -520,7 +520,7 @@ class ButtonFactory:
         Returns:
             InlineKeyboardButton
         """
-        return InlineKeyboardButton("◀️ Назад в меню", callback_data="main_menu")
+        return InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")
 
     @staticmethod
     def upload_more(content_type: str) -> InlineKeyboardButton:

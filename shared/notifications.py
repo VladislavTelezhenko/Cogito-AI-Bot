@@ -136,3 +136,72 @@ class NotificationService:
                 message_text,
                 keyboard
             )
+
+
+    # === SUPPORT TICKET NOTIFICATIONS ===
+
+    @staticmethod
+    async def notify_admin_new_ticket(bot, ticket_id: int, user_id: int, username: str, category: str):
+        """Уведомление админу о новом тикете"""
+        from shared.config import settings
+
+        admin_id = settings.ADMIN_TELEGRAM_ID
+        if admin_id == 0:
+            logger.warning("ADMIN_TELEGRAM_ID не настроен")
+            return
+
+        text = (
+            f"🆕 <b>Новый тикет поддержки</b>\n\n"
+            f"📋 ID тикета: {ticket_id}\n"
+            f"👤 Пользователь: @{username or 'без username'} (ID: {user_id})\n"
+            f"📂 Категория: {category}\n\n"
+            f"Используй /admin_tickets для просмотра"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления админу: {e}")
+
+    @staticmethod
+    async def notify_user_admin_reply(bot, user_id: int, ticket_id: int, admin_message: str):
+        """Уведомление пользователю об ответе админа"""
+
+        text = (
+            f"💬 <b>Ответ от поддержки</b>\n\n"
+            f"📋 Тикет #{ticket_id}\n\n"
+            f"{admin_message}\n\n"
+            f"Используй /my_tickets для просмотра диалога"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления пользователю: {e}")
+
+    @staticmethod
+    async def notify_user_ticket_closed(bot, user_id: int, ticket_id: int):
+        """Уведомление пользователю о закрытии тикета"""
+
+        text = (
+            f"✅ <b>Тикет закрыт</b>\n\n"
+            f"📋 Тикет #{ticket_id} был закрыт.\n\n"
+            f"Если у вас остались вопросы, создайте новый тикет: /support"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления пользователю: {e}")

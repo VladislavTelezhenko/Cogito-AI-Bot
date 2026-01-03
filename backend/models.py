@@ -2,7 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, DateTime, Float, Text, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from backend.database import Base
 
 
@@ -29,6 +29,7 @@ class User(Base):
     actions = relationship("UserDailyAction", back_populates="user")
     subscriptions = relationship("UserSubscription", back_populates="user")
     transactions = relationship("Transaction", back_populates="user")
+    support_tickets = relationship("SupportTicket", back_populates="user", cascade="all, delete-orphan")
 
 
 # user_actions - лог действий пользователей
@@ -193,3 +194,34 @@ class UserSubscription(Base):
     def is_active(self):
         # Проверка активности подписки
         return self.status == "active" and (self.end_date_fact is None or self.end_date_fact > datetime.now())
+
+
+# Таблица тикетов технической поддержки
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    telegram_id = Column(Integer, nullable=False)
+    username = Column(String(255), nullable=True)
+    category = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False, default='open', index=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    closed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="support_tickets")
+    messages = relationship("SupportMessage", back_populates="ticket", cascade="all, delete-orphan")
+
+
+# Сообщения по тикетам
+class SupportMessage(Base):
+    __tablename__ = "support_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("support_tickets.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_type = Column(String(20), nullable=False)
+    sender_id = Column(Integer, nullable=False)
+    message_text = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+    ticket = relationship("SupportTicket", back_populates="messages")

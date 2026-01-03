@@ -79,7 +79,7 @@ https://disk.yandex.ru/i/XXXXXX
 Не более 10 ссылок за один раз!
 """
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
@@ -201,7 +201,7 @@ async def handle_video_upload(update: Update, context):
         await update.message.reply_text(
             "⚠️ Пожалуйста, отправьте только ссылки на видео (без файлов).\n\n"
             "Формат: каждая ссылка с новой строки.",
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
         )
         return WAITING_VIDEO
 
@@ -220,7 +220,7 @@ async def handle_video_upload(update: Update, context):
             await update.message.reply_text(
                 "⚠️ Отправьте только полные ссылки на видео!\n\n"
                 f"Некорректная строка: {line[:50]}...\n\n",
-                reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]),
                 disable_web_page_preview=True
             )
             return WAITING_VIDEO
@@ -231,7 +231,7 @@ async def handle_video_upload(update: Update, context):
         await update.message.reply_text(
             f"⚠️ Максимум {Limits.BUFFER_MAX_ITEMS} ссылок за раз!\n\n"
             f"Отправлено: {len(urls)}",
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
         )
         return WAITING_VIDEO
 
@@ -262,7 +262,7 @@ async def handle_video_upload(update: Update, context):
                 "• YouTube\n"
                 "• Rutube\n"
                 "• Яндекс.Диск",
-                reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
             )
             return WAITING_VIDEO
 
@@ -290,7 +290,7 @@ async def handle_video_upload(update: Update, context):
 
         await update.message.reply_text(
             error_text,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]),
             disable_web_page_preview=True
         )
         return WAITING_VIDEO
@@ -333,7 +333,7 @@ async def handle_video_upload(update: Update, context):
             else:
                 text += Messages.MAX_TIER_INFO
 
-            keyboard.append([ButtonFactory.back_button("exit_upload")])
+            keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")])
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
 
@@ -361,7 +361,7 @@ async def handle_video_upload(update: Update, context):
             else:
                 text += Messages.DAILY_RESET_INFO
 
-            keyboard.append([ButtonFactory.back_button("exit_upload")])
+            keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")])
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return ConversationHandler.END
 
@@ -387,7 +387,10 @@ async def handle_video_upload(update: Update, context):
 
         await update.message.reply_text(
             success_text,
-            reply_markup=InlineKeyboardMarkup(ButtonFactory.success_keyboard("video"))
+            reply_markup=InlineKeyboardMarkup([
+                [ButtonFactory.upload_more("video")],
+                [InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")]
+            ])
         )
     else:
         logger.error(f"Ошибка загрузки видео: user={user.id}, error={error}")
@@ -409,7 +412,7 @@ async def handle_wrong_media_in_video(update: Update, context):
     """
     await update.message.reply_text(
         "⚠️ Пожалуйста, отправьте только полные ссылки на видео.\n\n",
-        reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
     )
 
     return WAITING_VIDEO

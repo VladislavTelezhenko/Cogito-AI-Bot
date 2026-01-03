@@ -17,6 +17,7 @@ import logging
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from typing import Optional, List
 
 from backend.database import get_db, engine
 from backend import models, schemas
@@ -581,6 +582,135 @@ def delete_document(request: Request, document_id: int, db: Session = Depends(ge
     logger.info(f"Документ {document_id} удалён")
 
     return {"success": True, "message": "Document deleted"}
+
+
+# === SUPPORT TICKET ENDPOINTS ===
+
+@app.post("/support/tickets", response_model=schemas.SupportTicketResponse)
+def create_support_ticket(
+        ticket_data: schemas.SupportTicketCreate,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        ticket = SupportService.create_ticket(
+            db=db,
+            telegram_id=ticket_data.telegram_id,
+            category=ticket_data.category
+        )
+
+        return ticket
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Ошибка создания тикета: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/support/tickets/{ticket_id}/messages", response_model=schemas.SupportMessageResponse)
+def add_ticket_message(
+        ticket_id: int,
+        message_data: schemas.SupportMessageCreate,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        message = SupportService.add_message(
+            db=db,
+            ticket_id=ticket_id,
+            sender_type=message_data.sender_type,
+            sender_id=message_data.sender_id,
+            message_text=message_data.message_text
+        )
+
+        return message
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Ошибка добавления сообщения: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/support/tickets", response_model=schemas.SupportTicketListResponse)
+def get_user_tickets(
+        telegram_id: int,
+        status: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        tickets = SupportService.get_user_tickets(
+            db=db,
+            telegram_id=telegram_id,
+            status=status
+        )
+
+        return {"tickets": tickets}
+    except Exception as e:
+        logger.error(f"Ошибка получения тикетов: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/support/tickets/all", response_model=schemas.SupportTicketListResponse)
+def get_all_tickets(
+        status: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        tickets = SupportService.get_all_tickets(
+            db=db,
+            status=status
+        )
+
+        return {"tickets": tickets}
+    except Exception as e:
+        logger.error(f"Ошибка получения всех тикетов: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/support/tickets/{ticket_id}/messages", response_model=List[schemas.SupportMessageResponse])
+def get_ticket_messages(
+        ticket_id: int,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        messages = SupportService.get_ticket_messages(
+            db=db,
+            ticket_id=ticket_id
+        )
+
+        return messages
+    except Exception as e:
+        logger.error(f"Ошибка получения сообщений: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/support/tickets/{ticket_id}/close", response_model=schemas.SupportTicketResponse)
+def close_ticket(
+        ticket_id: int,
+        db: Session = Depends(get_db)
+):
+    try:
+        from backend.services.support_service import SupportService
+
+        ticket = SupportService.close_ticket(
+            db=db,
+            ticket_id=ticket_id
+        )
+
+        return ticket
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Ошибка закрытия тикета: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================

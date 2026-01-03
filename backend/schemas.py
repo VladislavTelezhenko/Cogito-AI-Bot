@@ -1,7 +1,7 @@
 # Схемы валидации для API
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -127,3 +127,70 @@ class FileUploadResponse(BaseModel):
     success: bool
     uploaded_count: int
     task_ids: list[str]
+
+
+# СХЕМЫ САППОРТА
+
+# Схемы для сообщений
+class SupportMessageCreate(BaseModel):
+    ticket_id: int
+    sender_type: str  # 'user' или 'admin'
+    sender_id: int
+    message_text: str
+
+    class Config:
+        from_attributes = True
+
+
+class SupportMessageResponse(BaseModel):
+    id: int
+    ticket_id: int
+    sender_type: str
+    sender_id: int
+    message_text: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Схемы для тикетов
+class SupportTicketCreate(BaseModel):
+    user_id: int
+    telegram_id: int
+    username: Optional[str] = None
+    category: str
+    message_text: str  # первое сообщение пользователя
+
+    class Config:
+        from_attributes = True
+
+
+class SupportTicketResponse(BaseModel):
+    id: int
+    user_id: int
+    telegram_id: int
+    username: Optional[str]
+    category: str
+    status: str
+    created_at: datetime
+    closed_at: Optional[datetime]
+    messages: List[SupportMessageResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class SupportTicketListResponse(BaseModel):
+    id: int
+    user_id: int
+    telegram_id: int
+    username: Optional[str]
+    category: str
+    status: str
+    created_at: datetime
+    closed_at: Optional[datetime]
+    last_message: Optional[str] = None  # последнее сообщение для превью
+
+    class Config:
+        from_attributes = True

@@ -51,7 +51,7 @@ async def upload_text(update: Update, context):
 Отправьте ваш текст в следующем сообщении:
 """
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup)
@@ -76,7 +76,7 @@ async def handle_text_upload(update: Update, context):
     """
     # Проверка на вложения
     if update.message.photo or update.message.document or update.message.video:
-        keyboard = [[ButtonFactory.back_button("exit_upload")]]
+        keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]
         await update.message.reply_text(
             "⚠️ Отправьте только текст без вложений.",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -104,7 +104,10 @@ async def handle_text_upload(update: Update, context):
         await update.message.reply_text(
             "✅ Текст успешно добавлен в базу знаний!\n\n"
             "Теперь вы можете задавать вопросы по этому материалу\nили обучать нейросеть.",
-            reply_markup=InlineKeyboardMarkup(ButtonFactory.success_keyboard("text"))
+            reply_markup=InlineKeyboardMarkup([
+                [ButtonFactory.upload_more("text")],
+                [InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")]
+            ])
         )
     else:
         logger.error(f"Ошибка загрузки текста для пользователя {user.id}: {error}")
@@ -129,7 +132,7 @@ async def handle_wrong_media_in_text(update: Update, context):
     await update.message.reply_text(
         "⚠️ Пожалуйста, отправьте только текст без вложений.\n\n"
         "Для загрузки файлов, фото или видео используйте соответствующий раздел меню.",
-        reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("exit_upload")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
     )
 
     return WAITING_TEXT

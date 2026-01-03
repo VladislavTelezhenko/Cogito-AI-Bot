@@ -55,7 +55,7 @@ async def upload_file_doc(update: Update, context):
 
 Максимальный размер: {Limits.MAX_FILE_SIZE_MB} MB на файл"""
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
@@ -118,7 +118,7 @@ async def global_document_handler(update: Update, context):
 
         await update.message.reply_text(
             error_message,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("upload_file_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]])
         )
         return
 

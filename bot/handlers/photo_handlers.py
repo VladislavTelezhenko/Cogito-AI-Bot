@@ -96,7 +96,7 @@ async def upload_photo(update: Update, context):
 
     text = f"""🖼 Загрузка фото\n\nОтправьте <b>в одном сообщении</b> до {Limits.BUFFER_MAX_ITEMS} фото с текстом, который нужно распознать.\n\nПоддерживаемые форматы: JPG, PNG"""
 
-    keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="exit_upload")]]
+    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="exit_upload")]]
 
     if query.message.photo:
         await query.message.delete()

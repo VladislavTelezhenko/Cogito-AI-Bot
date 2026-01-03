@@ -11,7 +11,6 @@ from telegram.ext import ConversationHandler
 from shared.config import CONTENT_CONFIG, Messages
 from utils.bot_utils import (
     get_user_stats,
-    ButtonFactory,
     photo_uploader,
     file_uploader,
     logger
@@ -39,7 +38,7 @@ async def knowledge_base_menu(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload_file")],
         [InlineKeyboardButton("📋 Мои файлы", callback_data="my_files")],
-        [ButtonFactory.back_to_main()]
+        [InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -67,7 +66,7 @@ async def upload_file_menu(update: Update, context):
     if not success:
         await query.edit_message_text(
             Messages.ERROR_CONNECTION,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("knowledge_base")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="knowledge_base")]])
         )
         return
 
@@ -85,7 +84,7 @@ async def upload_file_menu(update: Update, context):
                 callback_data=config['callbacks']['upload']
             )])
 
-    keyboard.append([ButtonFactory.back_button("knowledge_base")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="knowledge_base")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text, reply_markup=reply_markup)

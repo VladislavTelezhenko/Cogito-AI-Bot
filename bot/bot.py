@@ -59,6 +59,18 @@ from bot.handlers import (
     delete_document,
 )
 
+from bot.handlers.support_handlers import (
+        support_menu,
+        new_ticket_callback,
+        my_tickets_callback,
+        view_ticket_callback,
+        handle_support_message,
+        admin_tickets_command,
+        admin_view_ticket,
+        handle_admin_message,
+        admin_close_ticket
+    )
+
 from bot.bot_subscriptions import (
     subscriptions_menu,
     handle_subscription_selection
@@ -387,6 +399,24 @@ def main():
     app.add_handler(CallbackQueryHandler(upload_photo, pattern="^upload_photo$"))
     app.add_handler(CallbackQueryHandler(upload_file_doc, pattern="^upload_file_doc$"))
     app.add_handler(CallbackQueryHandler(exit_upload, pattern="^exit_upload$"))
+
+    # Тех. поддержка
+    app.add_handler(CallbackQueryHandler(support_menu, pattern="^support$"))
+    app.add_handler(CallbackQueryHandler(new_ticket_callback, pattern="^new_ticket$"))
+    app.add_handler(CallbackQueryHandler(my_tickets_callback, pattern="^my_tickets$"))
+    app.add_handler(CallbackQueryHandler(view_ticket_callback, pattern="^view_ticket_"))
+    app.add_handler(CallbackQueryHandler(admin_view_ticket, pattern="^admin_view_"))
+    app.add_handler(CallbackQueryHandler(admin_close_ticket, pattern="^admin_close_"))
+    app.add_handler(CommandHandler("admin_tickets", admin_tickets_command))
+
+    # Message handler для тикетов (group=1, после глобальных)
+    async def support_message_router(update: Update, context):
+        if context.user_data.get('admin_reply_ticket'):
+            await handle_admin_message(update, context)
+        elif context.user_data.get('active_ticket_id'):
+            await handle_support_message(update, context)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, support_message_router), group=1)
 
     logger.info("🤖 Бот запущен!")
 

@@ -37,7 +37,7 @@ async def my_files(update: Update, context):
     if not success:
         await query.edit_message_text(
             Messages.ERROR_DATA,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("knowledge_base")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="knowledge_base")]])
         )
         return
 
@@ -62,7 +62,7 @@ async def my_files(update: Update, context):
             "Загрузите файлы, чтобы начать работу\nс базой знаний.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤 Загрузить файл", callback_data="upload_file")],
-                [ButtonFactory.back_button("knowledge_base")]
+                [InlineKeyboardButton("◀️ Назад", callback_data="knowledge_base")]
             ])
         )
         return
@@ -87,7 +87,7 @@ async def my_files(update: Update, context):
                 callback_data=config['callbacks']['my_list']
             )])
 
-    keyboard.append([ButtonFactory.back_button("knowledge_base")])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="knowledge_base")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -111,7 +111,7 @@ async def my_texts(update: Update, context):
     if not success:
         await query.edit_message_text(
             Messages.ERROR_DATA,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("my_files")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="my_files")]])
         )
         return
 
@@ -127,7 +127,7 @@ async def my_texts(update: Update, context):
             "📝 У вас пока нет текстов!",
             reply_markup=InlineKeyboardMarkup([
                 [ButtonFactory.upload_more("text")],
-                [ButtonFactory.back_button("my_files")]
+                [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
             ])
         )
         return
@@ -155,7 +155,7 @@ async def my_videos(update: Update, context):
     if not success:
         await query.edit_message_text(
             Messages.ERROR_DATA,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("my_files")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="my_files")]])
         )
         return
 
@@ -171,7 +171,7 @@ async def my_videos(update: Update, context):
             "🎥 У вас пока нет обработанных видео!",
             reply_markup=InlineKeyboardMarkup([
                 [ButtonFactory.upload_more("video")],
-                [ButtonFactory.back_button("my_files")]
+                [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
             ])
         )
         return
@@ -215,7 +215,7 @@ async def my_photos(update: Update, context):
         text = "🖼 У вас пока нет фото в базе знаний."
         keyboard = [
             [ButtonFactory.upload_more("photo")],
-            [ButtonFactory.back_button("my_files")]
+            [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
         ]
 
         if query.message.photo:
@@ -248,7 +248,7 @@ async def my_files_docs(update: Update, context):
     if not success:
         await query.edit_message_text(
             Messages.ERROR_DATA,
-            reply_markup=InlineKeyboardMarkup([[ButtonFactory.back_button("my_files")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="my_files")]])
         )
         return
 
@@ -264,7 +264,7 @@ async def my_files_docs(update: Update, context):
             "📄 У вас пока нет файлов!",
             reply_markup=InlineKeyboardMarkup([
                 [ButtonFactory.upload_more("file")],
-                [ButtonFactory.back_button("my_files")]
+                [InlineKeyboardButton("◀️ Назад", callback_data="my_files")]
             ])
         )
         return
@@ -331,7 +331,7 @@ async def view_document(update: Update, context):
         if is_last:
             keyboard = [
                 [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_doc_{doc_id}")],
-                [ButtonFactory.back_button(back_callback)]
+                [InlineKeyboardButton("◀️ Назад", callback_data=back_callback)]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -447,7 +447,7 @@ async def delete_document(update: Update, context):
 
         # Определяем callback для возврата
         back_callback = CONTENT_CONFIG.get(file_type, {}).get("callbacks", {}).get("my_list", "my_files")
-        keyboard = [[ButtonFactory.back_button(back_callback)]]
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data=back_callback)]]
 
         # Отправляем подтверждение
         if query.message.photo:
